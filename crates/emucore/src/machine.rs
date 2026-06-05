@@ -23,6 +23,16 @@ use crate::periph::Periph;
 fn dbg_flag(cell: &std::sync::OnceLock<bool>, name: &str) -> bool {
     *cell.get_or_init(|| std::env::var(name).is_ok())
 }
+
+/// VWATCH (env): wartosc do zlapania przy zapisie 16/32-bit (np. ID komunikatu). Cache.
+fn vwatch_val() -> Option<u32> {
+    static V: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("VWATCH")
+            .ok()
+            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+    })
+}
 use crate::sim::{Sim, SIM_BASE, SIM_END};
 use arm7tdmi::memory::{Addr, BusIO, DebugRead, MemoryAccess, MemoryInterface};
 use std::collections::HashMap;
@@ -343,12 +353,6 @@ impl Machine {
         // sprawdza ==1 by POMINAC dialog "SIM-Karte nicht angenommen". Flaga normalnie
         // ustawiana po rejestracji w sieci (baseband/DSP - poza zakresem). Test: czy to
         // jedyna bramka do ekranu glownego.
-        if addr == 0x0011_08D3 {
-            static SO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if dbg_flag(&SO, "SIM_OK") {
-                return 1;
-            }
-        }
         // CCONT przez GENSIO (odczyt rejestru).
         if addr == REG_CC_RD {
             return self.ccont.cc_read();
@@ -622,6 +626,7 @@ impl MemoryInterface for Machine {
             self.bump_counters(a, true);
             self.record(true, 16, a, value as u32);
         }
+        if vwatch_val() == Some(value as u32) { self.wwatch_hits.push((self.pc_hint, 0)); }
         let b = value.to_be_bytes(); // BIG-ENDIAN
         self.raw_write8(a, b[0]);
         self.raw_write8(a + 1, b[1]);
@@ -639,6 +644,7 @@ impl MemoryInterface for Machine {
             self.bump_counters(a, true);
             self.record(true, 32, a, value);
         }
+        if vwatch_val() == Some(value) { self.wwatch_hits.push((self.pc_hint, 0)); }
         let b = value.to_be_bytes(); // BIG-ENDIAN
         for (i, byte) in b.iter().enumerate() {
             self.raw_write8(a + i as u32, *byte);

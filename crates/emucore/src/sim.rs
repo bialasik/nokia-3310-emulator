@@ -104,9 +104,17 @@ fn gsm_select_response(fid: u16) -> Vec<u8> {
         r
     } else {
         // EF (0x6Fxx, 0x2Fxx, 0x4Fxx...). 15 bajtow.
+        // Struktura: pliki REKORDOWE (MSISDN/ADN/LND/ext) musza zwracac linear-fixed(01)/
+        // cyclic(03) + dlugosc rekordu - inaczej telefon SELECTuje ale nie czyta i init utyka.
+        let (structure, rec_len) = match fid {
+            0x6F40 | 0x6F3A | 0x6F3B | 0x6F49 | 0x6F4A | 0x6F4B | 0x6F4C => (0x01u8, 0x1Cu8),
+            0x6F44 | 0x6F4D => (0x03u8, 0x1Cu8), // cyclic (LND/...)
+            _ => (0x00u8, 0x00u8),               // transparent
+        };
+        let size: u16 = if rec_len > 0 { rec_len as u16 * 4 } else { 0x20 };
         let mut r = vec![0u8; 15];
-        r[2] = 0x00; // bajt 3-4: rozmiar pliku (32 bajty)
-        r[3] = 0x20;
+        r[2] = (size >> 8) as u8; // bajt 3-4: rozmiar pliku
+        r[3] = size as u8;
         r[4] = (fid >> 8) as u8; // bajt 5-6: file ID
         r[5] = fid as u8;
         r[6] = 0x04; // bajt 7: EF
@@ -114,8 +122,8 @@ fn gsm_select_response(fid: u16) -> Vec<u8> {
         // bajt 9-11: warunki dostepu (00 = READ ALWAYS)
         r[11] = 0x01; // bajt 12: status pliku (aktywny/nie uniewazniony)
         r[12] = 0x02; // bajt 13: dlugosc nastepujacych
-        r[13] = 0x00; // bajt 14: struktura (00=transparent)
-        r[14] = 0x00; // bajt 15: dlugosc rekordu (0 dla transparent)
+        r[13] = structure; // bajt 14: struktura (00=transp, 01=linear-fixed, 03=cyclic)
+        r[14] = rec_len; // bajt 15: dlugosc rekordu
         r
     }
 }

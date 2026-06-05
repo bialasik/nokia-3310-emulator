@@ -464,7 +464,7 @@ fn main() {
         if cpu.bus.watch_hits.len() > watch_prev || cpu.bus.wwatch_hits.len() > wwatch_prev {
             watch_prev = cpu.bus.watch_hits.len();
             wwatch_prev = cpu.bus.wwatch_hits.len();
-            if stack_dumps < 4 && i > 75_000_000 {
+            if stack_dumps < 4 && i > 71_000_000 {
                 stack_dumps += 1;
                 println!("\n[CALLSTACK @krok {i}] pc={pc:#08X} - lancuch wywolan (gora=najglebszy/ostatni):");
                 print!("    rejestry:");
