@@ -1,0 +1,13 @@
+[package]
+name = "emucore"
+version = "0.1.0"
+edition = "2021"
+description = "Rdzen emulacji Nokia 3310 (DCT3): magistrala, mapa pamieci, tracer"
+
+[dependencies]
+arm7tdmi = { path = "../arm7tdmi", features = ["debugger"] }
+rustboyadvance-utils = { path = "../rustboyadvance-utils" }
+
+[[bin]]
+name = "trace"
+path = "src/bin/trace.rs"

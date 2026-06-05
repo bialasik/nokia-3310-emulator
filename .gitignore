@@ -1,0 +1,13 @@
+/target
+Cargo.lock
+/roms/*
+!/roms/.gitkeep
+# firmware (chroniony prawami autorskimi - NIE commitować)
+crates/rom/*.fls
+crates/rom/_unused/
+# klony zewnętrzne (mados/swsim/rustboyadvance) + duże artefakty RE z firmware
+.vendor/
+docs/decomp/
+# lokalne / macOS
+.DS_Store
+.claude/

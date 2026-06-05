@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nokia3310",
+    "crates/emucore",            # rdzen emulacji: magistrala, mapa pamieci, loader, tracer
+    "crates/arm7tdmi",           # zwendorowany rdzen CPU (MIT, z rustboyadvance-ng)
+    "crates/rustboyadvance-utils", # zaleznosc arm7tdmi (Shared, elf)
+]
