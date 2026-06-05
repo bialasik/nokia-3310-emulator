@@ -175,6 +175,17 @@ impl Machine {
     }
 
     /// Krok urzadzen czasowych (timer CTSI + klawiatura) - wolac co krok CPU.
+    /// Czysty odczyt 32-bit big-endian z RAM (skan stosu/debug) - BEZ efektow ubocznych
+    /// (watch/record/dsp). Firmware DCT3 = BIG-ENDIAN, slowa na stosie tez.
+    pub fn peek_ram32(&self, addr: u32) -> u32 {
+        let a = (addr & !3) as usize;
+        if a + 3 < self.ram.len() {
+            u32::from_be_bytes([self.ram[a], self.ram[a + 1], self.ram[a + 2], self.ram[a + 3]])
+        } else {
+            0
+        }
+    }
+
     pub fn tick_timer(&mut self) {
         self.ctsi.tick();
         self.keypad.tick();
@@ -326,6 +337,16 @@ impl Machine {
             static EE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if dbg_flag(&EE, "EEPROM_LOG") {
                 eprintln!("[ee] read {addr:#08X} @pc={:#08X}", self.pc_hint);
+            }
+        }
+        // DIAGNOSTYKA (env SIM_OK): wymus flage SIM-OK [0x1108D3]=1 - handler MMI 0x273846
+        // sprawdza ==1 by POMINAC dialog "SIM-Karte nicht angenommen". Flaga normalnie
+        // ustawiana po rejestracji w sieci (baseband/DSP - poza zakresem). Test: czy to
+        // jedyna bramka do ekranu glownego.
+        if addr == 0x0011_08D3 {
+            static SO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if dbg_flag(&SO, "SIM_OK") {
+                return 1;
             }
         }
         // CCONT przez GENSIO (odczyt rejestru).

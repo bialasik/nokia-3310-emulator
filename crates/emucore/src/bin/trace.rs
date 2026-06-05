@@ -143,6 +143,11 @@ fn main() {
     let mut bank_chg_cnt = 0u32;
     let mut reset_log_cnt = 0u32;
     let mut lowjump_seen = false;
+    let mut watch_prev = 0usize; // do detekcji trafienia watch -> zrzut stosu
+    let mut wwatch_prev = 0usize; // jw. dla WWATCH (zapisy)
+    let mut stack_dumps = 0u32;
+    // Precyzyjny shadow call-stack (push na BL, pop na powrocie). Wymaga CALLS=1.
+    let mut callstack: Vec<(u32, u32)> = Vec::new();
     let mut usp_bad_seen = false;
     let mut halt_seen = false;
     let mut chk_seen = false;
@@ -447,6 +452,31 @@ fn main() {
         if is_call {
             let target = cpu.get_next_pc();
             *call_count.entry(target).or_insert(0) += 1;
+            // shadow stack: zapamietaj (miejsce wywolania, adres powrotu = lr po BL)
+            callstack.push((pc, cpu.get_reg(14) & !1));
+        } else if let Some(&(_, ret)) = callstack.last() {
+            // powrot: pc skoczyl na zapisany adres powrotu -> zdejmij ramke
+            if (cpu.get_next_pc() & !1) == ret {
+                callstack.pop();
+            }
+        }
+        // Zrzut PRECYZYJNEGO shadow-stacku gdy watch (odczyt) LUB wwatch (zapis) trafiony.
+        if cpu.bus.watch_hits.len() > watch_prev || cpu.bus.wwatch_hits.len() > wwatch_prev {
+            watch_prev = cpu.bus.watch_hits.len();
+            wwatch_prev = cpu.bus.wwatch_hits.len();
+            if stack_dumps < 4 && i > 75_000_000 {
+                stack_dumps += 1;
+                println!("\n[CALLSTACK @krok {i}] pc={pc:#08X} - lancuch wywolan (gora=najglebszy/ostatni):");
+                print!("    rejestry:");
+                for r in 0..=12 { print!(" r{r}={:08X}", cpu.get_reg(r)); }
+                println!();
+                let n = callstack.len();
+                for (k, (cs, ret)) in callstack.iter().enumerate().rev() {
+                    if n - k <= 30 {
+                        println!("    #{} call@{cs:#08X} -> ret {ret:#08X}", n - k);
+                    }
+                }
+            }
         }
 
         // Programowy reset CPU (firmware zapisal bit2 do IO_CTSI_RST 0x20001).
