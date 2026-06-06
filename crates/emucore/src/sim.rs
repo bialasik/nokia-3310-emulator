@@ -71,9 +71,10 @@ const RX_BYTE_DELAY: u32 = 30;
 const TX_READY_DELAY: u32 = 15;
 
 /// Czy komenda GSM jest case-3 (telefon -> karta dane po naglowku): SELECT/VERIFY/
-/// CHANGE/UNBLOCK CHV, UPDATE BINARY/RECORD, INCREASE. Inne = case-2 (karta -> telefon).
+/// CHANGE/UNBLOCK CHV, UPDATE BINARY/RECORD, INCREASE, TERMINAL PROFILE (0x10, SIM Toolkit:
+/// telefon wysyla profil + SW), TERMINAL RESPONSE (0x14). Inne = case-2 (karta -> telefon).
 fn is_case3(ins: u8) -> bool {
-    matches!(ins, 0xA4 | 0x20 | 0x24 | 0x2C | 0xD6 | 0xDC | 0x32)
+    matches!(ins, 0xA4 | 0x20 | 0x24 | 0x2C | 0xD6 | 0xDC | 0x32 | 0x10 | 0x14)
 }
 
 /// Buduje odpowiedz SELECT (FCP wg GSM 11.11 / TS 51.011) dla danego file ID.
@@ -201,6 +202,10 @@ impl Sim {
         if self.data_expected == 0 && self.apdu.len() == 5 {
             let ins = self.apdu[1];
             let p3 = self.apdu[4] as usize;
+            if std::env::var("SIM_INS").is_ok() {
+                eprintln!("[ins] CLA={:#04x} INS={:#04x} P1={:#04x} P2={:#04x} P3={} case3={}",
+                    self.apdu[0], ins, self.apdu[2], self.apdu[3], p3, is_case3(ins));
+            }
             if ins == 0x20 && std::env::var("SIM_LOG").is_ok() {
                 eprintln!("[sim] VERIFY CHV (PIN OK!) P1={:#04x} P2={:#04x} P3={}", self.apdu[2], self.apdu[3], p3);
             }
