@@ -5,6 +5,7 @@ Cargo.lock
 # firmware (chroniony prawami autorskimi - NIE commitować)
 crates/rom/*.fls
 crates/rom/_unused/
+crates/rom/_wrong_633/
 # klony zewnętrzne (mados/swsim/rustboyadvance) + duże artefakty RE z firmware
 .vendor/
 docs/decomp/
