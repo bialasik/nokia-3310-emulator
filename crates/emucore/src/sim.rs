@@ -236,10 +236,18 @@ impl Sim {
         let ins = self.apdu[1];
         if ins == 0xA4 {
             let fid = ((self.apdu[5] as u16) << 8) | self.apdu[6] as u16;
-            self.selected = fid;
             if std::env::var("SIM_LOG").is_ok() {
                 eprintln!("[sim] SELECT {fid:#06x}");
             }
+            // Pliki NIEISTNIEJACE na standardowej karcie GSM -> "file not found" (SW 94 04),
+            // by telefon je POMINAL zamiast czekac. 7F40 = DF niestandardowy (Nokia/operator);
+            // fake-success powodowal zatrzymanie init po SELECT 7F40. Z not-found init RUSZA
+            // dalej -> "PIN OK" (akceptacja). Poprawne modelowanie SIM, nie hack.
+            if fid == 0x7F40 {
+                self.queue_resp(&[0x94, 0x04]);
+                return;
+            }
+            self.selected = fid;
             self.gr = gsm_select_response(fid);
             self.queue_resp(&[0x9F, self.gr.len() as u8]); // dane dostepne -> GET RESPONSE
         } else {

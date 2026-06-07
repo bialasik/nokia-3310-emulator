@@ -161,6 +161,9 @@ fn main() {
     // Opcjonalny warunek: EXEC_BP_REG=N, EXEC_BP_VAL=hex -> lap tylko gdy r[N]==VAL.
     let exec_bp_reg = std::env::var("EXEC_BP_REG").ok().and_then(|s| s.parse::<usize>().ok());
     let exec_bp_val = std::env::var("EXEC_BP_VAL").ok().and_then(|s| parse_hex(&s));
+    // EXEC_BP_AFTER=krok: lap breakpoint dopiero PO tym kroku (pomija wczesne hot-trafienia,
+    // np. by zlapac porownanie SIMLOCK PO wpisaniu PIN, nie ATR-compare przy boocie).
+    let exec_bp_after: u64 = std::env::var("EXEC_BP_AFTER").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut exec_bp_cnt = 0u32;
     let mut cond7_cnt = 0u32; // licznik sondy COND7
     let mut pc_ram = 0u64;   // PC w RAM (<0x200000, poza wektorami)
@@ -197,7 +200,7 @@ fn main() {
             (Some(r), Some(v)) => cpu.get_reg(r) == v,
             _ => true,
         };
-        if Some(pc) == exec_bp && bp_cond && exec_bp_cnt < 40 {
+        if Some(pc) == exec_bp && bp_cond && exec_bp_cnt < 40 && i >= exec_bp_after {
             exec_bp_cnt += 1;
             print!("[EXEC_BP @{pc:#08X} #{exec_bp_cnt} krok {i}] r0..r12:");
             for r in 0..=12 { print!(" {:08X}", cpu.get_reg(r)); }
@@ -235,6 +238,12 @@ fn main() {
             if pc == 0x002E_F93E {
                 cpu.set_reg(0, 0); // wymus "walidacja OK" (r0=0) po handlerze 0xF0124
             }
+        }
+        // SIM_ACCEPT (eksperyment): handler SIM-MMI 0x2df51c dostaje param_1=0x5E2 (offset 0x128
+        // = REJECT, else=no-op). Wymus 0x5E1 (offset 0x127 = ACCEPT) -> FUN_002726be (SIM-ready)
+        // + post 0x32c (kaskada standby). Test czy odblokowuje przejscie do standby/menu.
+        if std::env::var("SIM_ACCEPT").is_ok() && pc == 0x002D_F51C && cpu.get_reg(0) == 0x5E2 {
+            cpu.set_reg(0, 0x5E1);
         }
         // Eksperyment FORCE_BOOT: wymus r0=1 po kazdej z 7 funkcji warunku glownej petli
         // bootu (0x2e1a76..0x2e1aa6 cmp r0,0). Pozwala przejsc warunek -> zobaczyc co za petla.

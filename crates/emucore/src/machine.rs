@@ -399,6 +399,16 @@ impl Machine {
                 return self.ram[addr as usize] | 0x80;
             }
         }
+        // SIM_READY (env): wymus flage SIM-ready [0x1108D3]=1 (struct 0x1108CC+7). Ta flaga
+        // bramkuje akceptacje SIM: ustawiana przez accept (FUN_002721fc) gdy init OK (msg 0x127).
+        // Telefon dostaje 0x128 (reject) -> flaga=0 -> prompt PIN + "SIM nicht angenommen".
+        // Wymuszenie =1 ma POMINAC prompt PIN i reject (SIM traktowana jako gotowa) -> standby/menu.
+        {
+            static SR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if addr == 0x0011_08D3 && dbg_flag(&SR, "SIM_READY") {
+                return 1;
+            }
+        }
         // FORCE_B2_AFTER: po N krokach czyść bit2 (0x04) flagi self-testu przy odczycie.
         // Build self-testu kończy ~1.07M (dane ustawione); opóźnione obejście pozwala
         // wyjść z wait-loop 0x2c2630 z poprawnym stanem (vs forsowanie od startu = phantom).

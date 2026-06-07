@@ -36,7 +36,8 @@ fn main() {
     };
     println!("firmware: {}", emu.firmware_id);
 
-    const CHUNK: u64 = 1_000_000;
+    let chunk: u64 = std::env::var("CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let CHUNK = chunk;
     let mut done = 0u64;
     let mut enter_pressed = false;
     let mut enter_released = false;
@@ -53,6 +54,10 @@ fn main() {
                 enter_released = true;
                 println!("[Enter ZWOLNIONY @krok {done}]");
             }
+        }
+        // Odtworz petle klawiatury OKNA: set_key(Power,false) co "klatke" (jak main.rs).
+        if std::env::var("GUI_KEYS").is_ok() {
+            emu.set_key(EmuKey::Power, false);
         }
         emu.run_steps(CHUNK);
         done += CHUNK;
