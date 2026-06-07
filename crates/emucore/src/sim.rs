@@ -45,11 +45,8 @@ pub struct Sim {
     data_expected: usize,
     /// Przygotowany bufor GET RESPONSE (FCP z ostatniego SELECT).
     gr: Vec<u8>,
-    /// Aktualnie wybrany plik (file ID) — do READ/GET RESPONSE.
+    /// Aktualnie wybrany plik (file ID).
     selected: u16,
-    /// Bieżący katalog DF/MF (file ID) — do STATUS. GSM 11.11: STATUS zwraca FCP
-    /// bieżącego KATALOGU, nie wybranego EF. Aktualizowany przy SELECT DF/MF.
-    current_df: u16,
     /// Odliczanie do przerwania TX-ready (FIFO TX oprozniony po zapisach). Re-arm na
     /// kazdy zapis TXD; po ostatnim -> tx_pending. Bez tego firmware nie dosyla komendy.
     tx_ready_delay: u32,
@@ -182,7 +179,6 @@ impl Sim {
             data_expected: 0,
             gr: Vec::new(),
             selected: 0x3F00,
-            current_df: 0x3F00,
             tx_ready_delay: 0,
             tx_pending: false,
         }
@@ -240,20 +236,10 @@ impl Sim {
         let ins = self.apdu[1];
         if ins == 0xA4 {
             let fid = ((self.apdu[5] as u16) << 8) | self.apdu[6] as u16;
+            self.selected = fid;
             if std::env::var("SIM_LOG").is_ok() {
                 eprintln!("[sim] SELECT {fid:#06x}");
             }
-            // Pliki NIEISTNIEJACE na standardowej karcie GSM -> "file not found" (SW 94 04),
-            // by telefon je POMINAL zamiast czekac. 7F40 = DF niestandardowy (Nokia/operator);
-            // fake-success powodowal zatrzymanie init po SELECT 7F40. Z not-found init RUSZA
-            // dalej -> "PIN OK" (akceptacja). Poprawne modelowanie SIM, nie hack.
-            if fid == 0x7F40 {
-                self.queue_resp(&[0x94, 0x04]);
-                return;
-            }
-            self.selected = fid;
-            let hi = (fid >> 8) as u8;
-            if hi == 0x3F || hi == 0x7F { self.current_df = fid; } // SELECT katalogu -> bieżący DF
             self.gr = gsm_select_response(fid);
             self.queue_resp(&[0x9F, self.gr.len() as u8]); // dane dostepne -> GET RESPONSE
         } else {
@@ -265,7 +251,7 @@ impl Sim {
     fn case2_data(&self, ins: u8, p3: usize) -> Vec<u8> {
         let src = match ins {
             0xC0 => self.gr.clone(),                    // GET RESPONSE: FCP z SELECT
-            0xF2 => gsm_select_response(self.current_df), // STATUS: FCP biezacego KATALOGU (nie EF!)
+            0xF2 => gsm_select_response(self.selected), // STATUS: FCP biezacego DF
             0xB0 | 0xB2 => {
                 // READ BINARY/RECORD: tresc wybranego EF od offsetu P1P2.
                 let off = ((self.apdu[2] as usize) << 8) | self.apdu[3] as usize;

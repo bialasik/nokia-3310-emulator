@@ -172,6 +172,8 @@ fn main() {
     // PC_HIST=1: histogram odwiedzin PC w bucketach co 0x10000 (0..0x400000 = 64 kosze).
     // Rozstrzyga ktore moduly sie WYKONUJA (np. 0x28=test executor/task3 self-test).
     let pc_hist_on = std::env::var("PC_HIST").is_ok();
+    // PC_HIST_FROM=krok: zacznij histogram dopiero po tym kroku (lokalizacja kodu po PIN).
+    let pc_hist_from: u64 = std::env::var("PC_HIST_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut pc_hist = vec![0u64; 64];
     // FINE=lo:hi (hex) -> histogram drobny (bucket 0x40) w [lo,hi). Lokalizuje petle.
     let fine: Option<(u64, u64)> = std::env::var("FINE").ok().and_then(|s| {
@@ -191,7 +193,7 @@ fn main() {
         if pc < 0x1000 { pc_low += 1; }
         else if pc < 0x0020_0000 { pc_ram += 1; }
         else { pc_rom += 1; }
-        if pc_hist_on { let b = (pc >> 16) as usize; if b < 64 { pc_hist[b] += 1; } }
+        if pc_hist_on && i >= pc_hist_from { let b = (pc >> 16) as usize; if b < 64 { pc_hist[b] += 1; } }
         if let Some((lo, hi)) = fine { let p = pc as u64; if p >= lo && p < hi { fine_hist[((p - lo) >> 6) as usize] += 1; } }
         if let Some((lo, hi)) = lastpc { let p = pc as u64; if p >= lo && p < hi { lastpc_seen = Some((pc, i)); } }
         // Breakpoint na realnie wykonywanym adresie (dziala tez dla kodu w RAM).
