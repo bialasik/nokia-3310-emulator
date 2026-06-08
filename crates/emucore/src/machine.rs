@@ -445,10 +445,19 @@ impl Machine {
         // bramkuje akceptacje SIM: ustawiana przez accept (FUN_002721fc) gdy init OK (msg 0x127).
         // Telefon dostaje 0x128 (reject) -> flaga=0 -> prompt PIN + "SIM nicht angenommen".
         // Wymuszenie =1 ma POMINAC prompt PIN i reject (SIM traktowana jako gotowa) -> standby/menu.
-        {
-            static SR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if addr == 0x0011_08D3 && dbg_flag(&SR, "SIM_READY") {
-                return 1;
+        // SIM_READY_FROM=tick (opcjonalnie): wymuszaj flage=1 DOPIERO od tego kroku - pozwala
+        // PIN+faza-2 init przejsc normalnie (prompt widoczny, flaga=0), a potem "zaakceptowac"
+        // SIM (flaga=1) by odblokowac standby/menu. Spojny stan vs globalne SIM_READY (limbo).
+        if addr == 0x0011_08D3 {
+            static SR: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+            let cfg = SR.get_or_init(|| {
+                if std::env::var("SIM_READY").is_err() { return None; }
+                Some(std::env::var("SIM_READY_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0))
+            });
+            if let Some(from) = *cfg {
+                if self.tick_count >= from {
+                    return 1;
+                }
             }
         }
         // FORCE_B2_AFTER: po N krokach czyść bit2 (0x04) flagi self-testu przy odczycie.

@@ -46,7 +46,38 @@ fn main() {
     let pin: Vec<u8> = std::env::var("PIN").ok().map(|s| s.bytes().filter(|b| b.is_ascii_digit()).map(|b| b - b'0').collect()).unwrap_or_default();
     let pin_at: u64 = std::env::var("PIN_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(22_000_000);
     let mut pin_phase = vec![false; pin.len() * 2 + 2]; // press/release per cyfra + press/release OK
+    // POST_KEYS="select:36000000,down:38000000,...": klawisze PO PIN (test menu z ekranu reject).
+    // Nazwy: select(=Menu), up, down, back, c. Kazdy trzymany 1.5M.
+    let post_keys: Vec<(EmuKey, u64)> = std::env::var("POST_KEYS").ok().map(|s| s.split(',').filter_map(|p| {
+        let mut it = p.split(':');
+        let name = it.next()?;
+        let step: u64 = it.next()?.parse().ok()?;
+        let key = match name.trim() {
+            "select" | "menu" => EmuKey::Select,
+            "up" => EmuKey::Up,
+            "down" => EmuKey::Down,
+            "back" | "c" => EmuKey::Back,
+            _ => return None,
+        };
+        Some((key, step))
+    }).collect()).unwrap_or_default();
+    let mut post_phase = vec![false; post_keys.len() * 2];
+    // DUMP_AT="36000000,40000000": dodatkowe zrzuty ekranu w tych krokach.
+    let dump_at: Vec<u64> = std::env::var("DUMP_AT").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+    let mut dumped: Vec<bool> = vec![false; dump_at.len()];
     while done < total {
+        for (i, &(key, step)) in post_keys.iter().enumerate() {
+            if !post_phase[i * 2] && done >= step {
+                emu.set_key(key, true); post_phase[i * 2] = true;
+                println!("[POST_KEY #{i} WCISNIETY @krok {done}]");
+            }
+            if !post_phase[i * 2 + 1] && done >= step + 1_500_000 {
+                emu.set_key(key, false); post_phase[i * 2 + 1] = true;
+            }
+        }
+        for (i, &d) in dump_at.iter().enumerate() {
+            if !dumped[i] && done >= d { dumped[i] = true; dump(&emu, &format!("DUMP_AT krok {done}")); }
+        }
         // Wstrzyknij Enter (Select) w zadanym kroku, zwolnij ~5M krokow pozniej.
         if let Some(ea) = enter_at {
             if !enter_pressed && done >= ea {
