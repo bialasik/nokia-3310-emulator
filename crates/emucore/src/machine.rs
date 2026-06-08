@@ -341,6 +341,22 @@ impl Machine {
     }
 
     fn raw_read8(&mut self, addr: u32) -> u8 {
+        // SIMDBG="lo:hi" (okno krokow): loguj odczyty RAM przez SERWER SIM (pc 0x299000-0x29B000)
+        // -> ujawnia WEJSCIA decyzji accept/reject (niezmienna flaga bramkujaca accept).
+        {
+            static W: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+            let win = W.get_or_init(|| std::env::var("SIMDBG").ok().and_then(|s| {
+                let mut it = s.splitn(2, ':');
+                Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+            }));
+            if let Some((lo, hi)) = win {
+                if self.tick_count >= *lo && self.tick_count <= *hi
+                    && (0x0029_9000..0x0029_B000).contains(&self.pc_hint)
+                    && addr < 0x0020_0000 {
+                    eprintln!("[simrd {addr:#08X}={:02X} @pc={:#08X} tick={}]", self.ram[addr as usize], self.pc_hint, self.tick_count);
+                }
+            }
+        }
         // Diagnostyka SIMLOCK: log odczytow EEPROM/PM (0x3D0000-0x400000) z PC. Sprawdz
         // zakres NAJPIERW (tani), flaga env cache'owana (nie co krok).
         if (0x003D_0000..0x0040_0000).contains(&addr) {
