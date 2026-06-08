@@ -518,6 +518,21 @@ impl Machine {
                 eprintln!("[wwatch {addr:#08X}<-{val:#04X} @pc={:#08X} tick={}]", self.pc_hint, self.tick_count);
             }
         }
+        // WWRANGE="lo:hi" (hex): loguj zapisy do [lo,hi) z wartoscia != 0xAA (rejestracja handlera
+        // = realny adres fn != bss-fill 0xAA). Ujawnia CZY/KTO populuje tablice handlerow SIM.
+        {
+            static R: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+            let rng = R.get_or_init(|| std::env::var("WWRANGE").ok().and_then(|s| {
+                let mut it = s.splitn(2, ':');
+                Some((u32::from_str_radix(it.next()?.trim_start_matches("0x"), 16).ok()?,
+                      u32::from_str_radix(it.next()?.trim_start_matches("0x"), 16).ok()?))
+            }));
+            if let Some((lo, hi)) = rng {
+                if addr >= *lo && addr < *hi && val != 0xAA {
+                    eprintln!("[wwrange {addr:#08X}<-{val:#04X} @pc={:#08X} tick={}]", self.pc_hint, self.tick_count);
+                }
+            }
+        }
         // Eksperyment test-bypass (env FORCE_ST): flaga self-testu 0x11ff15 bit7=OK.
         // Firmware kasuje bit7 gdy test podzespolu (COBBA/GSM - nieemulowany) zawodzi,
         // co daje ekran CONTACT SERVICE. Wymuszamy bit7=1 przy kazdym zapisie flagi,
