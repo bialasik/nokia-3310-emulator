@@ -664,6 +664,20 @@ impl MemoryInterface for Machine {
         // Firmware DCT3 jest BIG-ENDIAN.
         let v = u16::from_be_bytes([self.raw_read8(a), self.raw_read8(a + 1)]);
         let v = self.dsp.read_fixup(a, v as u32) as u16;
+        // DSPRD="lo:hi" (tick): loguj odczyty shared-mem DSP (0x10000-0x10200) - co firmware
+        // czyta po MDIRCV (oczekiwany format odpowiedzi L1).
+        {
+            static D: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+            let win = D.get_or_init(|| std::env::var("DSPRD").ok().and_then(|s| {
+                let mut it = s.splitn(2, ':');
+                Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+            }));
+            if let Some((lo, hi)) = win {
+                if self.tick_count >= *lo && self.tick_count <= *hi && (0x0001_0000..0x0001_0200).contains(&a) {
+                    eprintln!("[dsprd {a:#08X}={v:#06X} @pc={:#08X} tick={}]", self.pc_hint, self.tick_count);
+                }
+            }
+        }
         if Self::loggable(a) {
             self.bump_counters(a, false);
             self.record(false, 16, a, v as u32);

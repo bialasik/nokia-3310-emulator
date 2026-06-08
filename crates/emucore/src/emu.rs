@@ -74,6 +74,8 @@ impl Emulator {
         ).unwrap_or_default();
         // EMU_BP_R0=hex: filtruj EMU_BP tylko gdy r0==val (np. konkretny msg id do 0x2e9896).
         let emu_bp_r0: Option<u32> = std::env::var("EMU_BP_R0").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
+        // EMU_BP_FROM=krok: ignoruj trafienia EMU_BP przed tym krokiem (pomija boot, lap post-PIN).
+        let emu_bp_from: u64 = std::env::var("EMU_BP_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         let mut emu_bp_cnt = 0u32;
         let mut step_no = self.total_steps;
         // EMU_TRACE=1: zrzuc ostatnie 32 PC przed trafieniem EMU_BP (prawdziwa sciezka wykonania).
@@ -96,7 +98,7 @@ impl Emulator {
                         *pcwin_hist.entry(pc & !0xFF).or_insert(0) += 1;
                     }
                 }
-                if !emu_bps.is_empty() && emu_bps.contains(&pc) && emu_bp_cnt < 60
+                if !emu_bps.is_empty() && emu_bps.contains(&pc) && emu_bp_cnt < 60 && step_no >= emu_bp_from
                     && emu_bp_r0.map(|v| cpu.get_reg(0) == v).unwrap_or(true) {
                     emu_bp_cnt += 1;
                     let mem = std::env::var("EMU_BP_MEM").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
