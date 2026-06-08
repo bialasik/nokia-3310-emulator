@@ -27,6 +27,8 @@ const AD_BSI: u16 = 570; // kanal 3: wskaznik baterii (jak wczesniej - self-test
 const AD_VCHAR: u16 = 0; // kanal 5: brak ladowarki (BYLO 570 = falszywa ladowarka!)
 const AD_ICHAR: u16 = 0; // kanal 7: brak pradu ladowania
 const AD_BTEMP: u16 = 570; // kanaly inne: jak wczesniej (brak regresji)
+const AD_RSSI: u16 = 0x3FF; // kanal 1: sila sygnalu odbieranego (wg MAME nokia_3310.cpp = pelny)
+const AD_BSITYPE: u16 = 0x280; // kanal 3: typ baterii (wg MAME)
 
 pub struct Ccont {
     regs: [u8; 0x10],
@@ -112,8 +114,9 @@ impl Ccont {
     /// Wartosc ADC (10-bit) dla aktualnie wybranego zrodla.
     fn ad_value(&self) -> u16 {
         match self.ad_source {
+            1 => AD_RSSI,   // sila sygnalu (MAME: 0x3ff) - telefon czyta RSSI; wczesniej spadalo na BTEMP
             2 => AD_VBAT,
-            3 => AD_BSI,
+            3 => AD_BSITYPE, // typ baterii (MAME: 0x280)
             5 => AD_VCHAR,
             7 => AD_ICHAR,
             _ => AD_BTEMP,
