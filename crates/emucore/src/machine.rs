@@ -250,15 +250,12 @@ impl Machine {
                 // receive firmware sie uruchamia i czyta kolejke. Typ testowy 0x00, pusty payload.
                 static MR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                 if dbg_flag(&MR, "DSP_MDI_REPLY") && self.tick_count > 33_000_000 {
-                    // Drenuj komendy L1 z MDISND, odpowiedz na kazda przez MDIRCV. Domyslnie ECHO
-                    // typu komendy (DSP potwierdza). Env DSP_MDI_TYPE=hex wymusza staly typ odpowiedzi.
-                    let forced = std::env::var("DSP_MDI_TYPE").ok().and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok());
-                    while let Some((typ, _payload)) = self.mdi_recv_command() {
-                        if std::env::var("MDI_LOG").is_ok() {
-                            eprintln!("[mdi_cmd typ={typ:#04x} @tick={}]", self.tick_count);
-                        }
-                        self.mdi_send_reply(forced.unwrap_or(typ), &[]);
-                    }
+                    // Odpowiedz przez MDIRCV na kazdy kick. NIE konsumujemy MDISND (firmware sam nim
+                    // zarzadza; konsumpcja desynchronizowala kolejke send). Typ: env DSP_MDI_TYPE (def 0).
+                    // Payload: env DSP_MDI_PAY="w0,w1,..." (slowa hex), domyslnie pusty.
+                    let typ = std::env::var("DSP_MDI_TYPE").ok().and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+                    let pay: Vec<u16> = std::env::var("DSP_MDI_PAY").ok().map(|s| s.split(',').filter_map(|x| u16::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default();
+                    self.mdi_send_reply(typ, &pay);
                 }
             }
             None => {}
