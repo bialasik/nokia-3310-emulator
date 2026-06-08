@@ -76,6 +76,10 @@ impl Emulator {
         let emu_bp_r0: Option<u32> = std::env::var("EMU_BP_R0").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
         let mut emu_bp_cnt = 0u32;
         let mut step_no = self.total_steps;
+        // EMU_TRACE=1: zrzuc ostatnie 32 PC przed trafieniem EMU_BP (prawdziwa sciezka wykonania).
+        let emu_trace = std::env::var("EMU_TRACE").is_ok();
+        let mut pcring = [0u32; 32];
+        let mut pcri = 0usize;
         // PCWIN="lo:hi": histogram PC (bucket 0x100) w oknie krokow [lo,hi] - lokalizuje
         // funkcje ewaluacji (np. decyzja accept/reject po init SIM). Wynik w self.pcwin_hist.
         let pcwin: Option<(u64, u64)> = std::env::var("PCWIN").ok().and_then(|s| {
@@ -86,6 +90,7 @@ impl Emulator {
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             for _ in 0..n {
                 let pc = cpu.get_next_pc();
+                if emu_trace { pcring[pcri % 32] = pc; pcri += 1; }
                 if let Some((lo, hi)) = pcwin {
                     if step_no >= lo && step_no <= hi && (0x0020_0000..0x0034_0000).contains(&pc) {
                         *pcwin_hist.entry(pc & !0xFF).or_insert(0) += 1;
@@ -101,6 +106,11 @@ impl Emulator {
                     }).unwrap_or_default();
                     eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} lr={:08X}{memstr}",
                         pc, cpu.get_reg(0), cpu.get_reg(1), cpu.get_reg(2), cpu.get_reg(14));
+                    if emu_trace {
+                        let mut s = String::from("  sciezka(ostatnie 32 PC): ");
+                        for k in 0..32 { s.push_str(&format!("{:06X} ", pcring[(pcri + k) % 32] & 0xFFFFFF)); }
+                        eprintln!("{s}");
+                    }
                 }
                 step_no += 1;
                 // SIM_ACCEPT: przepisz reject (0x5E2) na accept (0x5E1) na wejsciu handlera SIM.
