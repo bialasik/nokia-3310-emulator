@@ -470,6 +470,11 @@ impl Machine {
             if self.wwatch_hits.len() > 300 {
                 self.wwatch_hits.remove(0);
             }
+            // WWATCH_LOG: live eprintln (krok=tick_count, pc, val) - dziala w wintest/GUI.
+            static WL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if dbg_flag(&WL, "WWATCH_LOG") {
+                eprintln!("[wwatch {addr:#08X}<-{val:#04X} @pc={:#08X} tick={}]", self.pc_hint, self.tick_count);
+            }
         }
         // Eksperyment test-bypass (env FORCE_ST): flaga self-testu 0x11ff15 bit7=OK.
         // Firmware kasuje bit7 gdy test podzespolu (COBBA/GSM - nieemulowany) zawodzi,

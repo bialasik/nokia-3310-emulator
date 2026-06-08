@@ -96,6 +96,14 @@ fn main() {
                 fe, fm, fl, im, t0, t0t, arm);
         }
     }
+    if std::env::var("PCWIN").is_ok() {
+        let mut v: Vec<(u32, u64)> = emu.pcwin_hist.iter().map(|(k, c)| (*k, *c)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("=== PCWIN histogram (top 25 bucketow 0x100) ===");
+        for (pc, c) in v.iter().take(25) {
+            println!("  {pc:#08X}: {c}");
+        }
+    }
     dump(&emu, &format!("krok {done}"));
     let (kr, kh, ka) = emu.key_diag();
     println!("battery_mv={} clock={:?} crashed={} | KEYPAD: KPD_C odczyty={kr} z_klawiszem={kh} IRQ_asercje={ka}",

@@ -27,6 +27,8 @@ pub struct Emulator {
     /// SIM-REJECT). Przepisz na 0x5E1 (offset 0x127 = ACCEPT) -> pelna kaskada (post 0x32c +
     /// SIM-ready 0x2726be). Test czy odblokowuje standby/menu (vs samo wymuszenie flagi=limbo).
     sim_accept: bool,
+    /// Histogram PC (bucket 0x100) w oknie krokow PCWIN - lokalizacja funkcji ewaluacji.
+    pub pcwin_hist: std::collections::HashMap<u32, u64>,
 }
 
 impl Emulator {
@@ -49,6 +51,7 @@ impl Emulator {
             force_reason: std::env::var("FORCE_REASON").ok().and_then(|s| s.parse().ok()),
             force_boot: std::env::var("FORCE_BOOT").is_ok(),
             sim_accept: std::env::var("SIM_ACCEPT").is_ok(),
+            pcwin_hist: std::collections::HashMap::new(),
         })
     }
 
@@ -70,9 +73,21 @@ impl Emulator {
         ).unwrap_or_default();
         let mut emu_bp_cnt = 0u32;
         let mut step_no = self.total_steps;
+        // PCWIN="lo:hi": histogram PC (bucket 0x100) w oknie krokow [lo,hi] - lokalizuje
+        // funkcje ewaluacji (np. decyzja accept/reject po init SIM). Wynik w self.pcwin_hist.
+        let pcwin: Option<(u64, u64)> = std::env::var("PCWIN").ok().and_then(|s| {
+            let mut it = s.splitn(2, ':');
+            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+        });
+        let pcwin_hist = &mut self.pcwin_hist;
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             for _ in 0..n {
                 let pc = cpu.get_next_pc();
+                if let Some((lo, hi)) = pcwin {
+                    if step_no >= lo && step_no <= hi && (0x0020_0000..0x0034_0000).contains(&pc) {
+                        *pcwin_hist.entry(pc & !0xFF).or_insert(0) += 1;
+                    }
+                }
                 if !emu_bps.is_empty() && emu_bps.contains(&pc) && emu_bp_cnt < 60 {
                     emu_bp_cnt += 1;
                     eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} lr={:08X}",
