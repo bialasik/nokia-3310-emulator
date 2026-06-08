@@ -102,6 +102,8 @@ pub struct Machine {
     /// Write-watch (env WWATCH): loguje (pc, wartosc) przy KAZDYM zapisie bajtu pod ten adres.
     pub wwatch: Option<u32>,
     pub wwatch_hits: Vec<(u32, u8)>,
+    /// Licznik wymuszen SIM_GATE (celowany hack bramki reject).
+    sim_gate_cnt: u32,
     /// Programowy reset CPU zazadany (zapis bitu 2 do IO_CTSI_RST). Pętla wykonania
     /// wykrywa flage i wykonuje soft-reset (PC=FW_ENTRY). Licznik = ile resetow.
     pub reset_request: bool,
@@ -164,6 +166,7 @@ impl Machine {
             keypad: Keypad::new(),
             wwatch: std::env::var("WWATCH").ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok()),
             wwatch_hits: Vec::new(),
+            sim_gate_cnt: 0,
             reset_request: false,
             reset_count: 0,
             key_irq_asserts: 0,
@@ -357,13 +360,27 @@ impl Machine {
                 }
             }
         }
-        // SIM_GATE (env): eksperyment - w menedzerze sesji SIM @0x299966 (`ldrb r0,[r0,0xf]`)
-        // wymus bit1=1 w czytanym bajcie. @0x299968 `lsrs r0,r0,2; bhs` -> bit1 SET pomija
-        // kolejkowanie komunikatu-5 (reject). Test czy to omija fallback-reject.
-        {
-            static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if self.pc_hint == 0x0029_9966 && dbg_flag(&G, "SIM_GATE") {
-                return self.ram[addr as usize] | 0x02;
+        // SIM_GATE (env): CELOWANY hack bramki reject - @0x299966 (`ldrb r0,[r0,0xf]`) wymus bit1=1
+        // -> @0x299968 `bhs` pomija kolejkowanie komunikatu-5 (reject). Globalnie WIESZA round-robin,
+        // wiec celujemy: tylko w oknie [SIM_GATE_FROM,SIM_GATE_TO] (po PIN) i max SIM_GATE_N razy,
+        // by pominac KONKRETNA sesje-reject bez zatrzymania round-robina.
+        if self.pc_hint == 0x0029_9966 && addr < 0x0020_0000 {
+            static G: std::sync::OnceLock<Option<(u64, u64, u32)>> = std::sync::OnceLock::new();
+            let cfg = G.get_or_init(|| {
+                if std::env::var("SIM_GATE").is_err() { return None; }
+                let from = std::env::var("SIM_GATE_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let to = std::env::var("SIM_GATE_TO").ok().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+                let n = std::env::var("SIM_GATE_N").ok().and_then(|s| s.parse().ok()).unwrap_or(u32::MAX);
+                Some((from, to, n))
+            });
+            if let Some((from, to, n)) = *cfg {
+                if self.tick_count >= from && self.tick_count <= to && self.sim_gate_cnt < n {
+                    self.sim_gate_cnt += 1;
+                    if std::env::var("SIM_GATE_LOG").is_ok() {
+                        eprintln!("[sim_gate #{} @tick={} byte={:#04X}->bit1]", self.sim_gate_cnt, self.tick_count, self.ram[addr as usize]);
+                    }
+                    return self.ram[addr as usize] | 0x02;
+                }
             }
         }
         // Diagnostyka SIMLOCK: log odczytow EEPROM/PM (0x3D0000-0x400000) z PC. Sprawdz
