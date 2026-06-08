@@ -357,6 +357,15 @@ impl Machine {
                 }
             }
         }
+        // SIM_GATE (env): eksperyment - w menedzerze sesji SIM @0x299966 (`ldrb r0,[r0,0xf]`)
+        // wymus bit1=1 w czytanym bajcie. @0x299968 `lsrs r0,r0,2; bhs` -> bit1 SET pomija
+        // kolejkowanie komunikatu-5 (reject). Test czy to omija fallback-reject.
+        {
+            static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if self.pc_hint == 0x0029_9966 && dbg_flag(&G, "SIM_GATE") {
+                return self.ram[addr as usize] | 0x02;
+            }
+        }
         // Diagnostyka SIMLOCK: log odczytow EEPROM/PM (0x3D0000-0x400000) z PC. Sprawdz
         // zakres NAJPIERW (tani), flaga env cache'owana (nie co krok).
         if (0x003D_0000..0x0040_0000).contains(&addr) {
