@@ -245,12 +245,12 @@ impl Machine {
                 // DSP skonsumowal komende MDI -> wyczysc mailbox 0x100e0 (baseband moze
                 // wyslac kolejna komende L1). Patrz dsp.rs on_dspif_write.
                 self.mmio_w16(crate::dsp::DSP_MDI_MAILBOX, 0x0000);
-                // DSP_MDI_REPLY (env, EKSPERYMENT): po skonsumowaniu komendy L1, DSP "odpowiada"
-                // przez FIQ_MDIRCV (FIQL bit1). Post-PIN FIQM bit1 odmaskowany -> handler MDIRCV
-                // przetworzy odpowiedz. Test czy odblokowuje rejestracje SIM (vs reject).
+                // DSP_MDI_REPLY (env): po skonsumowaniu komendy L1 (post-PIN), DSP odpowiada przez
+                // kolejke MDIRCV (wg MADos mdi.c) + FIQ_MDIRCV. Walidacja transportu: czy handler
+                // receive firmware sie uruchamia i czyta kolejke. Typ testowy 0x00, pusty payload.
                 static MR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                if dbg_flag(&MR, "DSP_MDI_REPLY") {
-                    self.ctsi.fiq_latch |= 1 << 1; // MDIRCV
+                if dbg_flag(&MR, "DSP_MDI_REPLY") && self.tick_count > 33_000_000 {
+                    self.mdi_send_reply(0x00, &[]);
                 }
             }
             None => {}
@@ -264,6 +264,46 @@ impl Machine {
             // DSP shared mem: slowa little-endian (firmware czyta ldrh).
             self.mmio[off] = val as u8;
             self.mmio[off + 1] = (val >> 8) as u8;
+        }
+    }
+
+    /// Odczyt slowa shared-mem DSP BIG-ENDIAN (jak firmware ldrh: high bajt na nizszym adresie).
+    /// byte_addr = adres w MMIO (np. 0x101C8 = MDIRCV_TAIL).
+    fn dsp_r16(&self, byte_addr: u32) -> u16 {
+        let off = (byte_addr - MMIO_START) as usize;
+        ((self.mmio[off] as u16) << 8) | self.mmio[off + 1] as u16
+    }
+    /// Zapis slowa shared-mem DSP BIG-ENDIAN.
+    fn dsp_w16(&mut self, byte_addr: u32, val: u16) {
+        let off = (byte_addr - MMIO_START) as usize;
+        self.mmio[off] = (val >> 8) as u8;
+        self.mmio[off + 1] = val as u8;
+    }
+
+    /// Wysyla raport L1 do firmware przez kolejke MDIRCV (wg MADos mdi.c, offsety potwierdzone
+    /// w 6.39). Slowo kontrolne {rozmiar_bajtow_payload, typ} + payload (slowa) od TAIL, advance
+    /// TAIL (ring buffer), wyzwala FIQ_MDIRCV. Firmware (head!=tail) odczyta i zdispatchuje wg typu.
+    /// Layout (slowa _dsp[]): QUEUE=0x80 (byte 0x10100), QUEUEEND=0xE4, SIZE=0x64, TAIL@0x101C8, HEAD@0x101CA.
+    fn mdi_send_reply(&mut self, msg_type: u8, payload: &[u16]) {
+        const QUEUE: u16 = 0x80;
+        const QEND: u16 = 0xE4;
+        const QSIZE: u16 = 0x64;
+        const TAIL_ADDR: u32 = 0x0001_01C8;
+        const BASE: u32 = 0x0001_0000;
+        let mut t = self.dsp_r16(TAIL_ADDR);
+        if t < QUEUE || t >= QEND { t = QUEUE; } // bezpiecznik na niezainicjowany/zly TAIL
+        // slowo kontrolne: high bajt = rozmiar payload w bajtach, low bajt = typ MDI.
+        let ctrl = (((payload.len() as u16) * 2) << 8) | msg_type as u16;
+        self.dsp_w16(BASE + t as u32 * 2, ctrl);
+        t += 1; if t >= QEND { t -= QSIZE; }
+        for &pw in payload {
+            self.dsp_w16(BASE + t as u32 * 2, pw);
+            t += 1; if t >= QEND { t -= QSIZE; }
+        }
+        self.dsp_w16(TAIL_ADDR, t);
+        self.ctsi.fiq_latch |= 1 << 0; // FIQ_MDIRCV = bit0 (MADos int.h; bit1=MDISND ack przez send)
+        if std::env::var("MDI_LOG").is_ok() {
+            eprintln!("[mdi_reply typ={msg_type:#04x} payload={} slow -> TAIL={t:#x} @tick={}]", payload.len(), self.tick_count);
         }
     }
     /// Zapis do regionu flash (komenda lub dane). Interpretuje FSM flash i wykonuje
