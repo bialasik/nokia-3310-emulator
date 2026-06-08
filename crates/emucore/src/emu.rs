@@ -6,6 +6,7 @@ use crate::lcd;
 use crate::machine::FW_ENTRY;
 use crate::{loader, Machine};
 use arm7tdmi::Arm7tdmiCore;
+use arm7tdmi::memory::DebugRead;
 use rustboyadvance_utils::Shared;
 use std::panic::AssertUnwindSafe;
 
@@ -93,7 +94,12 @@ impl Emulator {
                 if !emu_bps.is_empty() && emu_bps.contains(&pc) && emu_bp_cnt < 60
                     && emu_bp_r0.map(|v| cpu.get_reg(0) == v).unwrap_or(true) {
                     emu_bp_cnt += 1;
-                    eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} lr={:08X}",
+                    let mem = std::env::var("EMU_BP_MEM").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
+                    let memstr = mem.map(|a| {
+                        let b = [cpu.bus.debug_read_8(a), cpu.bus.debug_read_8(a+1), cpu.bus.debug_read_8(a+2), cpu.bus.debug_read_8(a+3)];
+                        format!(" mem[{a:#08X}]={:02X} {:02X} {:02X} {:02X}", b[0], b[1], b[2], b[3])
+                    }).unwrap_or_default();
+                    eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} lr={:08X}{memstr}",
                         pc, cpu.get_reg(0), cpu.get_reg(1), cpu.get_reg(2), cpu.get_reg(14));
                 }
                 step_no += 1;
