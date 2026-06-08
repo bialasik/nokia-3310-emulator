@@ -424,6 +424,16 @@ impl Machine {
     }
 
     fn raw_read8(&mut self, addr: u32) -> u8 {
+        // SIM_ACCEPT_STATE (env): bramka accept SIMUPL @0x29ed06 czyta byte[0x10fac7] (stan SIM);
+        // jesli ==0x65/0x67 -> POST ACCEPT (msg 0x5E1 -> SIM-ready). Runtime nigdy nie osiaga 0x65/0x67
+        // -> accept nie pada -> reject. Wymus 0x67 PRZY TYM ODCZYCIE -> bramka accept. Test czy odblokowuje.
+        if self.pc_hint == 0x0029_ED06 && addr == 0x0010_FAC7 {
+            static SA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if dbg_flag(&SA, "SIM_ACCEPT_STATE") {
+                eprintln!("[sim_accept_state @tick={} -> wymuszam byte[0x10fac7]=0x67]", self.tick_count);
+                return 0x67;
+            }
+        }
         // SIMDBG="lo:hi" (okno krokow): loguj odczyty RAM przez SERWER SIM (pc 0x299000-0x29B000)
         // -> ujawnia WEJSCIA decyzji accept/reject (niezmienna flaga bramkujaca accept).
         {
