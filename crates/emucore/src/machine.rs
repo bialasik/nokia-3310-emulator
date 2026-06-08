@@ -250,7 +250,15 @@ impl Machine {
                 // receive firmware sie uruchamia i czyta kolejke. Typ testowy 0x00, pusty payload.
                 static MR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                 if dbg_flag(&MR, "DSP_MDI_REPLY") && self.tick_count > 33_000_000 {
-                    self.mdi_send_reply(0x00, &[]);
+                    // Drenuj komendy L1 z MDISND, odpowiedz na kazda przez MDIRCV. Domyslnie ECHO
+                    // typu komendy (DSP potwierdza). Env DSP_MDI_TYPE=hex wymusza staly typ odpowiedzi.
+                    let forced = std::env::var("DSP_MDI_TYPE").ok().and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+                    while let Some((typ, _payload)) = self.mdi_recv_command() {
+                        if std::env::var("MDI_LOG").is_ok() {
+                            eprintln!("[mdi_cmd typ={typ:#04x} @tick={}]", self.tick_count);
+                        }
+                        self.mdi_send_reply(forced.unwrap_or(typ), &[]);
+                    }
                 }
             }
             None => {}
@@ -278,6 +286,34 @@ impl Machine {
         let off = (byte_addr - MMIO_START) as usize;
         self.mmio[off] = (val >> 8) as u8;
         self.mmio[off + 1] = val as u8;
+    }
+
+    /// Czyta komende L1 z kolejki MDISND (MCU->DSP, wg MADos): od HEAD slowo kontrolne {rozmiar,typ}
+    /// + payload, advance HEAD (ring). Zwraca (typ, payload). DSP konsumuje komendy by firmware mogl
+    /// wysylac kolejne (free = head-tail). QUEUE=0x00, QUEUEEND=0x52, SIZE=0x52, HEAD@0x100A6, TAIL@0x100A4.
+    fn mdi_recv_command(&mut self) -> Option<(u8, Vec<u16>)> {
+        const QUEUE: u16 = 0x00;
+        const QEND: u16 = 0x52;
+        const QSIZE: u16 = 0x52;
+        const HEAD_ADDR: u32 = 0x0001_00A6;
+        const TAIL_ADDR: u32 = 0x0001_00A4;
+        const BASE: u32 = 0x0001_0000;
+        let mut h = self.dsp_r16(HEAD_ADDR);
+        let tail = self.dsp_r16(TAIL_ADDR);
+        if h == tail { return None; } // pusto
+        if h >= QEND { h = QUEUE; }
+        let ctrl = self.dsp_r16(BASE + h as u32 * 2);
+        let size_bytes = (ctrl >> 8) as usize;
+        let typ = (ctrl & 0xFF) as u8;
+        let words = size_bytes.div_ceil(2);
+        h += 1; if h >= QEND { h -= QSIZE; }
+        let mut payload = Vec::with_capacity(words);
+        for _ in 0..words {
+            payload.push(self.dsp_r16(BASE + h as u32 * 2));
+            h += 1; if h >= QEND { h -= QSIZE; }
+        }
+        self.dsp_w16(HEAD_ADDR, h);
+        Some((typ, payload))
     }
 
     /// Wysyla raport L1 do firmware przez kolejke MDIRCV (wg MADos mdi.c, offsety potwierdzone
