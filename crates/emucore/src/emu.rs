@@ -23,6 +23,10 @@ pub struct Emulator {
     force_reason: Option<u32>,
     /// Wymus przejscie 7 warunkow glownej petli bootu (env FORCE_BOOT).
     force_boot: bool,
+    /// Wymus akceptacje SIM (env SIM_ACCEPT): handler 0x2df51c dostaje 0x5E2 (offset 0x128 =
+    /// SIM-REJECT). Przepisz na 0x5E1 (offset 0x127 = ACCEPT) -> pelna kaskada (post 0x32c +
+    /// SIM-ready 0x2726be). Test czy odblokowuje standby/menu (vs samo wymuszenie flagi=limbo).
+    sim_accept: bool,
 }
 
 impl Emulator {
@@ -44,6 +48,7 @@ impl Emulator {
             force_r5: std::env::var("FORCE_R5").is_ok(),
             force_reason: std::env::var("FORCE_REASON").ok().and_then(|s| s.parse().ok()),
             force_boot: std::env::var("FORCE_BOOT").is_ok(),
+            sim_accept: std::env::var("SIM_ACCEPT").is_ok(),
         })
     }
 
@@ -57,9 +62,27 @@ impl Emulator {
         let force_r5 = self.force_r5;
         let force_reason = self.force_reason;
         let force_boot = self.force_boot;
+        let sim_accept = self.sim_accept;
+        // EMU_BP=hex[,hex...]: loguj trafienia PC (krok,r0,lr) - diagnostyka sciezki na wiernej
+        // sciezce Emulatora (wintest/GUI), bo trace.rs nie bootuje wiernie (SIM nieaktywny).
+        let emu_bps: Vec<u32> = std::env::var("EMU_BP").ok().map(|s|
+            s.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()
+        ).unwrap_or_default();
+        let mut emu_bp_cnt = 0u32;
+        let mut step_no = self.total_steps;
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             for _ in 0..n {
                 let pc = cpu.get_next_pc();
+                if !emu_bps.is_empty() && emu_bps.contains(&pc) && emu_bp_cnt < 60 {
+                    emu_bp_cnt += 1;
+                    eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} lr={:08X}",
+                        pc, cpu.get_reg(0), cpu.get_reg(1), cpu.get_reg(2), cpu.get_reg(14));
+                }
+                step_no += 1;
+                // SIM_ACCEPT: przepisz reject (0x5E2) na accept (0x5E1) na wejsciu handlera SIM.
+                if sim_accept && pc == 0x002D_F51C && cpu.get_reg(0) == 0x5E2 {
+                    cpu.set_reg(0, 0x5E1);
+                }
                 // EKSPERYMENT (env FORCE_R5): mock komunikatu "stan bootu=1" w barierze
                 // 0x2ef9b6 stocka + wcisniecie POWER (skan zwraca 0x81). Pozwala przejsc
                 // do renderu ekranu startowego. Domyslnie wylaczone.
