@@ -71,6 +71,8 @@ impl Emulator {
         let emu_bps: Vec<u32> = std::env::var("EMU_BP").ok().map(|s|
             s.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()
         ).unwrap_or_default();
+        // EMU_BP_R0=hex: filtruj EMU_BP tylko gdy r0==val (np. konkretny msg id do 0x2e9896).
+        let emu_bp_r0: Option<u32> = std::env::var("EMU_BP_R0").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
         let mut emu_bp_cnt = 0u32;
         let mut step_no = self.total_steps;
         // PCWIN="lo:hi": histogram PC (bucket 0x100) w oknie krokow [lo,hi] - lokalizuje
@@ -88,7 +90,8 @@ impl Emulator {
                         *pcwin_hist.entry(pc & !0xFF).or_insert(0) += 1;
                     }
                 }
-                if !emu_bps.is_empty() && emu_bps.contains(&pc) && emu_bp_cnt < 60 {
+                if !emu_bps.is_empty() && emu_bps.contains(&pc) && emu_bp_cnt < 60
+                    && emu_bp_r0.map(|v| cpu.get_reg(0) == v).unwrap_or(true) {
                     emu_bp_cnt += 1;
                     eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} lr={:08X}",
                         pc, cpu.get_reg(0), cpu.get_reg(1), cpu.get_reg(2), cpu.get_reg(14));
