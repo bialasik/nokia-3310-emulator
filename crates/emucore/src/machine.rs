@@ -245,6 +245,13 @@ impl Machine {
                 // DSP skonsumowal komende MDI -> wyczysc mailbox 0x100e0 (baseband moze
                 // wyslac kolejna komende L1). Patrz dsp.rs on_dspif_write.
                 self.mmio_w16(crate::dsp::DSP_MDI_MAILBOX, 0x0000);
+                // DSP_MDI_REPLY (env, EKSPERYMENT): po skonsumowaniu komendy L1, DSP "odpowiada"
+                // przez FIQ_MDIRCV (FIQL bit1). Post-PIN FIQM bit1 odmaskowany -> handler MDIRCV
+                // przetworzy odpowiedz. Test czy odblokowuje rejestracje SIM (vs reject).
+                static MR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if dbg_flag(&MR, "DSP_MDI_REPLY") {
+                    self.ctsi.fiq_latch |= 1 << 1; // MDIRCV
+                }
             }
             None => {}
         }
