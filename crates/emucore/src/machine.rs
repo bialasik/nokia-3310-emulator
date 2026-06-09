@@ -104,6 +104,9 @@ pub struct Machine {
     pub wwatch_hits: Vec<(u32, u8)>,
     /// Licznik wymuszen SIM_GATE (celowany hack bramki reject).
     sim_gate_cnt: u32,
+    /// Live force-read (debugger): odczyt tego adresu zwraca wymuszona wartosc. Pozwala
+    /// testowac "co jesli byte[X]=V" bez rebuildu. Sprawdzane na poczatku raw_read8.
+    pub force_reads: std::collections::HashMap<u32, u8>,
     /// Programowy reset CPU zazadany (zapis bitu 2 do IO_CTSI_RST). Pętla wykonania
     /// wykrywa flage i wykonuje soft-reset (PC=FW_ENTRY). Licznik = ile resetow.
     pub reset_request: bool,
@@ -167,6 +170,7 @@ impl Machine {
             wwatch: std::env::var("WWATCH").ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok()),
             wwatch_hits: Vec::new(),
             sim_gate_cnt: 0,
+            force_reads: std::collections::HashMap::new(),
             reset_request: false,
             reset_count: 0,
             key_irq_asserts: 0,
@@ -411,6 +415,24 @@ impl Machine {
         }
     }
 
+    /// Debug: odczyt bajtu bez efektow ubocznych (RAM/MMIO/ROM bezposrednio). Dla debuggera.
+    pub fn dbg_read8(&self, addr: u32) -> u8 {
+        match Self::region(addr) {
+            Region::Ram => self.ram[addr as usize],
+            Region::Mmio => self.mmio[(addr - MMIO_START) as usize],
+            Region::Rom => self.rom.get((addr - ROM_START) as usize).copied().unwrap_or(0xFF),
+            Region::Unmapped => 0xFF,
+        }
+    }
+    /// Debug: zapis bajtu bezposrednio do RAM/MMIO (bez FSM flash/efektow). Dla debuggera.
+    pub fn dbg_write8(&mut self, addr: u32, val: u8) {
+        match Self::region(addr) {
+            Region::Ram => self.ram[addr as usize] = val,
+            Region::Mmio => self.mmio[(addr - MMIO_START) as usize] = val,
+            _ => {}
+        }
+    }
+
     fn record(&mut self, write: bool, width: u8, addr: u32, value: u32) {
         if self.trace.len() < self.trace_limit {
             self.trace.push(Access {
@@ -424,6 +446,10 @@ impl Machine {
     }
 
     fn raw_read8(&mut self, addr: u32) -> u8 {
+        // Live force-read (debugger): jesli adres w mapie, zwroc wymuszona wartosc.
+        if !self.force_reads.is_empty() {
+            if let Some(&v) = self.force_reads.get(&addr) { return v; }
+        }
         // SIM_ACCEPT_STATE (env): bramka accept SIMUPL @0x29ed06 czyta byte[0x10fac7] (stan SIM);
         // jesli ==0x65/0x67 -> POST ACCEPT (msg 0x5E1 -> SIM-ready). Runtime nigdy nie osiaga 0x65/0x67
         // -> accept nie pada -> reject. Wymus 0x67 PRZY TYM ODCZYCIE -> bramka accept. Test czy odblokowuje.

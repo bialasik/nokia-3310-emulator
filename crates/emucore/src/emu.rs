@@ -243,6 +243,89 @@ impl Emulator {
             self.cpu.bus.keypad.release_code(code);
         }
     }
+
+    // ===== API DEBUGGERA (interaktywny REPL crates/emucore/src/bin/dbg.rs) =====
+
+    /// Jeden krok CPU z hookami env (jak run_steps, bez instrumentacji EMU_BP). Dla debuggera.
+    #[inline]
+    fn tick_cpu(&mut self) {
+        let (sim_accept, force_r5, force_reason, force_boot) =
+            (self.sim_accept, self.force_r5, self.force_reason, self.force_boot);
+        let cpu = &mut self.cpu;
+        let pc = cpu.get_next_pc();
+        if sim_accept && pc == 0x002D_F51C && cpu.get_reg(0) == 0x5E2 { cpu.set_reg(0, 0x5E1); }
+        if force_r5 && pc == 0x002E_F9B6 { cpu.set_reg(5, 1); cpu.bus.keypad.set_power(true); }
+        if force_r5 && pc == 0x0033_8D68 { cpu.bus.keypad.set_power(false); }
+        if let Some(v) = force_reason { if pc == 0x002E_F924 { cpu.set_reg(4, v); } }
+        if force_boot && matches!(pc, 0x002E_1A76 | 0x002E_1A7E | 0x002E_1A86 | 0x002E_1A8E
+            | 0x002E_1A96 | 0x002E_1A9E | 0x002E_1AA6) { cpu.set_reg(0, 1); }
+        cpu.bus.pc_hint = pc;
+        cpu.step();
+        if cpu.bus.reset_request {
+            cpu.bus.reset_request = false;
+            cpu.bus.reset_count += 1;
+            cpu.reset();
+            cpu.set_reg(15, FW_ENTRY);
+            cpu.reload_pipeline32();
+            return;
+        }
+        cpu.bus.tick_timer();
+        if cpu.bus.fiq_active() { cpu.fiq(); }
+        else if cpu.bus.irq_active() || cpu.bus.take_irq_tick() { cpu.irq(); }
+    }
+
+    /// Wykonuje do max krokow LUB az PC == target. Zwraca (trafiono_target, wykonane_kroki).
+    pub fn run_until(&mut self, target: u32, max: u64) -> (bool, u64) {
+        if self.crashed { return (false, 0); }
+        let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut done = 0u64;
+            let mut hit = false;
+            while done < max {
+                if self.cpu.get_next_pc() == target { hit = true; break; }
+                self.tick_cpu();
+                done += 1;
+            }
+            (hit, done)
+        }));
+        match res {
+            Ok((hit, done)) => { self.total_steps += done; (hit, done) }
+            Err(_) => { self.crashed = true; eprintln!("[emu] panika"); (false, 0) }
+        }
+    }
+
+    /// Wykonuje do max krokow LUB az dowolny PC z `targets`. Zwraca (Some(trafiony_pc), kroki).
+    pub fn run_until_any(&mut self, targets: &[u32], max: u64) -> (Option<u32>, u64) {
+        if self.crashed { return (None, 0); }
+        let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut done = 0u64;
+            let mut hit = None;
+            while done < max {
+                let pc = self.cpu.get_next_pc();
+                if targets.contains(&pc) { hit = Some(pc); break; }
+                self.tick_cpu();
+                done += 1;
+            }
+            (hit, done)
+        }));
+        match res {
+            Ok((hit, done)) => { self.total_steps += done; (hit, done) }
+            Err(_) => { self.crashed = true; (None, 0) }
+        }
+    }
+
+    pub fn read8(&self, addr: u32) -> u8 { self.cpu.bus.dbg_read8(addr) }
+    pub fn read16(&self, addr: u32) -> u16 { u16::from_be_bytes([self.read8(addr), self.read8(addr + 1)]) }
+    pub fn read32(&self, addr: u32) -> u32 {
+        u32::from_be_bytes([self.read8(addr), self.read8(addr + 1), self.read8(addr + 2), self.read8(addr + 3)])
+    }
+    pub fn write8(&mut self, addr: u32, val: u8) { self.cpu.bus.dbg_write8(addr, val); }
+    pub fn get_reg(&self, n: usize) -> u32 { self.cpu.get_reg(n) }
+    pub fn set_reg(&mut self, n: usize, v: u32) { self.cpu.set_reg(n, v); }
+    /// Live force-read: odczyt `addr` bedzie zwracal `val` (test "co jesli"). Patrz unforce_read.
+    pub fn force_read(&mut self, addr: u32, val: u8) { self.cpu.bus.force_reads.insert(addr, val); }
+    pub fn unforce_read(&mut self, addr: u32) { self.cpu.bus.force_reads.remove(&addr); }
+    pub fn clear_forces(&mut self) { self.cpu.bus.force_reads.clear(); }
+    pub fn total_steps(&self) -> u64 { self.total_steps }
 }
 
 /// Klawisze telefonu (mapowane przez frontend z klawiatury PC).
