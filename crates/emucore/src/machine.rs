@@ -427,11 +427,17 @@ impl Machine {
         // SIM_ACCEPT_STATE (env): bramka accept SIMUPL @0x29ed06 czyta byte[0x10fac7] (stan SIM);
         // jesli ==0x65/0x67 -> POST ACCEPT (msg 0x5E1 -> SIM-ready). Runtime nigdy nie osiaga 0x65/0x67
         // -> accept nie pada -> reject. Wymus 0x67 PRZY TYM ODCZYCIE -> bramka accept. Test czy odblokowuje.
-        if self.pc_hint == 0x0029_ED06 && addr == 0x0010_FAC7 {
-            static SA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if dbg_flag(&SA, "SIM_ACCEPT_STATE") {
-                eprintln!("[sim_accept_state @tick={} -> wymuszam byte[0x10fac7]=0x67]", self.tick_count);
-                return 0x67;
+        // Wymus byte[0x10fac7]=0x67 (kod OK SIM) przy KAZDYM odczycie po SIM_ACCEPT_FROM krokow
+        // (domyslnie 34M = post-PIN). Aktywny handler accept (ktorykolwiek z 4 posterow 0x5E1)
+        // zobaczy kod OK -> accept. Okno post-PIN by nie psuc wczesniejszego przetwarzania SIM.
+        if addr == 0x0010_FAC7 {
+            static SA: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+            let from = SA.get_or_init(|| {
+                if std::env::var("SIM_ACCEPT_STATE").is_err() { return None; }
+                Some(std::env::var("SIM_ACCEPT_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(34_000_000))
+            });
+            if let Some(f) = *from {
+                if self.tick_count >= f { return 0x67; }
             }
         }
         // SIMDBG="lo:hi" (okno krokow): loguj odczyty RAM przez SERWER SIM (pc 0x299000-0x29B000)
