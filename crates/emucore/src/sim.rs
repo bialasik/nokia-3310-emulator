@@ -50,6 +50,11 @@ pub struct Sim {
     gr: Vec<u8>,
     /// Aktualnie wybrany plik (file ID).
     selected: u16,
+    /// Aktualny KATALOG (MF/DF) - bieżący DF. STATUS (0xF2) MUSI zwracac FCP tego DF, nie
+    /// wybranego EF (GSM 11.11 9.2.2). Telefon poluje STATUS by wykryc usuniecie/zmiane SIM:
+    /// zmienny EF-FCP zamiast stabilnego DF-FCP = "karta wyjeta" -> insert-SIM. Aktualizowany
+    /// przy SELECT DF/MF.
+    current_df: u16,
     /// Odliczanie do przerwania TX-ready (FIFO TX oprozniony po zapisach). Re-arm na
     /// kazdy zapis TXD; po ostatnim -> tx_pending. Bez tego firmware nie dosyla komendy.
     tx_ready_delay: u32,
@@ -274,6 +279,7 @@ impl Sim {
             data_expected: 0,
             gr: Vec::new(),
             selected: 0x3F00,
+            current_df: 0x3F00,
             tx_ready_delay: 0,
             tx_pending: false,
             ef_data: default_ef_data(),
@@ -371,6 +377,11 @@ impl Sim {
                     return;
                 }
                 self.selected = fid;
+                // Sledzenie biezacego DF: MF (3F00) lub DF (7Fxx) zmienia katalog. EF (6Fxx/2Fxx/4Fxx)
+                // NIE zmienia DF. Potrzebne by STATUS zwracal stabilny FCP katalogu (detekcja obecnosci).
+                if fid == 0x3F00 || (fid & 0xFF00) == 0x7F00 {
+                    self.current_df = fid;
+                }
                 self.gr = gsm_select_response(fid);
                 self.queue_resp(&[0x9F, self.gr.len() as u8]); // dane dostepne -> GET RESPONSE
             }
@@ -478,7 +489,10 @@ impl Sim {
     fn case2_data(&self, ins: u8, p3: usize) -> Vec<u8> {
         let src = match ins {
             0xC0 => self.gr.clone(),                    // GET RESPONSE: FCP z SELECT / RUN GSM ALGO
-            0xF2 => gsm_select_response(self.selected), // STATUS: FCP biezacego DF
+            // STATUS: FCP biezacego DF (GSM 11.11 9.2.2). Poprawny current_df dopiero PO PIN -
+            // kruchy boot 6.39 zalezy od starego (selected) zachowania przed PIN (inaczej utyka).
+            0xF2 if self.chv1_verified => gsm_select_response(self.current_df),
+            0xF2 => gsm_select_response(self.selected),
             0xB0 => {
                 // READ BINARY: tresc wybranego EF od offsetu P1P2 (z mutowalnego store).
                 let off = ((self.apdu[2] as usize) << 8) | self.apdu[3] as usize;
