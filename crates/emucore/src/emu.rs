@@ -80,6 +80,15 @@ impl Emulator {
         let mut step_no = self.total_steps;
         // EMU_TRACE=1: zrzuc ostatnie 32 PC przed trafieniem EMU_BP (prawdziwa sciezka wykonania).
         let emu_trace = std::env::var("EMU_TRACE").is_ok();
+        // NET_ACCEPT=hex: przepisz return 0x21CB6C (r0 @0x21CE1A) na wartosc rejestracji sieci
+        // (0x25B/0x25D = zarejestrowany; domyslnie 0x25D). EKSPERYMENT: czy handshake sieci
+        // odblokowuje genuine-accept 0x2726BE -> menu (bez modelu L1/baseband).
+        let net_accept: Option<u32> = std::env::var("NET_ACCEPT").ok().map(|s|
+            u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok().unwrap_or(0x25D));
+        // LOOP_BREAK: wymus inny return 0x29AA40 by ominac re-init SIM (@0x29BCF2). Wartosc=LOOP_BREAK (def 0).
+        let loop_break = std::env::var("LOOP_BREAK").is_ok();
+        let loop_break_val: u32 = std::env::var("LOOP_BREAK").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+        let desc_force: Option<u32> = std::env::var("DESC_FORCE").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
         let mut pcring = [0u32; 32];
         let mut pcri = 0usize;
         // PCWIN="lo:hi": histogram PC (bucket 0x100) w oknie krokow [lo,hi] - lokalizuje
@@ -89,9 +98,22 @@ impl Emulator {
             Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
         });
         let pcwin_hist = &mut self.pcwin_hist;
+        // BTRACE: ring ostatnich N WYKONANYCH skokow (from->to). Wykrywa skok gdy pc != prev_pc+2/+4.
+        // Zrzucany przy trafieniu EMU_BP -> PRAWDZIWE cialo petli (nie statyczny disasm). BTRACE_N=rozmiar.
+        let btrace = std::env::var("BTRACE").is_ok();
+        let btrace_n: usize = std::env::var("BTRACE_N").ok().and_then(|s| s.parse().ok()).unwrap_or(800).max(1);
+        let mut bring: Vec<(u32, u32)> = vec![(0u32, 0u32); btrace_n];
+        let mut bri = 0usize;
+        let mut prev_pc = 0u32;
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             for _ in 0..n {
                 let pc = cpu.get_next_pc();
+                if btrace {
+                    if prev_pc != 0 && pc != prev_pc.wrapping_add(2) && pc != prev_pc.wrapping_add(4) {
+                        bring[bri % btrace_n] = (prev_pc, pc); bri += 1;
+                    }
+                    prev_pc = pc;
+                }
                 if emu_trace { pcring[pcri % 32] = pc; pcri += 1; }
                 if let Some((lo, hi)) = pcwin {
                     if step_no >= lo && step_no <= hi && (0x0020_0000..0x0034_0000).contains(&pc) {
@@ -106,11 +128,22 @@ impl Emulator {
                         let b = [cpu.bus.debug_read_8(a), cpu.bus.debug_read_8(a+1), cpu.bus.debug_read_8(a+2), cpu.bus.debug_read_8(a+3)];
                         format!(" mem[{a:#08X}]={:02X} {:02X} {:02X} {:02X}", b[0], b[1], b[2], b[3])
                     }).unwrap_or_default();
-                    eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} lr={:08X}{memstr}",
-                        pc, cpu.get_reg(0), cpu.get_reg(1), cpu.get_reg(2), cpu.get_reg(14));
+                    eprintln!("[EMU_BP @{:#08X} #{emu_bp_cnt} krok {step_no}] r0={:08X} r1={:08X} r2={:08X} r3={:08X} r4={:08X} r5={:08X} r6={:08X} r7={:08X} lr={:08X}{memstr}",
+                        pc, cpu.get_reg(0), cpu.get_reg(1), cpu.get_reg(2), cpu.get_reg(3), cpu.get_reg(4), cpu.get_reg(5), cpu.get_reg(6), cpu.get_reg(7), cpu.get_reg(14));
                     if emu_trace {
                         let mut s = String::from("  sciezka(ostatnie 32 PC): ");
                         for k in 0..32 { s.push_str(&format!("{:06X} ", pcring[(pcri + k) % 32] & 0xFFFFFF)); }
+                        eprintln!("{s}");
+                    }
+                    if btrace {
+                        let cnt = bri.min(btrace_n);
+                        let start = bri - cnt;
+                        let mut s = format!("  BTRACE ({cnt} skokow from>to, najnowsze ostatnie):\n");
+                        for (i, k) in (start..bri).enumerate() {
+                            let (f, t) = bring[k % btrace_n];
+                            s.push_str(&format!("{:06X}>{:06X} ", f & 0xFFFFFF, t & 0xFFFFFF));
+                            if (i + 1) % 8 == 0 { s.push('\n'); }
+                        }
                         eprintln!("{s}");
                     }
                 }
@@ -118,6 +151,21 @@ impl Emulator {
                 // SIM_ACCEPT: przepisz reject (0x5E2) na accept (0x5E1) na wejsciu handlera SIM.
                 if sim_accept && pc == 0x002D_F51C && cpu.get_reg(0) == 0x5E2 {
                     cpu.set_reg(0, 0x5E1);
+                }
+                // NET_ACCEPT: przy return z 0x21CB6C (handshake sieci) wymus "zarejestrowany".
+                if let Some(v) = net_accept {
+                    if pc == 0x0021_CE1A { cpu.set_reg(0, v); }
+                }
+                // LOOP_BREAK: re-init SIM pada gdy 0x29AA40 (krok sesji SIM) zwraca 1 -> switch @0x29B90A.
+                // Punkt zweryfikowany BTRACE: 0x29BBDA (cmp r0,0x38) tuz po bl 0x29AA40. Wymus r0!=1
+                // (LOOP_BREAK=wartosc stanu) -> inna galaz switcha zamiast re-init. Sweep by znalezc progres.
+                if loop_break && pc == 0x0029_BBDA && cpu.get_reg(0) == 1 {
+                    cpu.set_reg(0, loop_break_val);
+                }
+                // DESC_FORCE: SIMUPL klasyfikuje deskryptor poziomu byte[sp+2] (@0x29AC84 r0) - placeholder
+                // daje 0x18 -> typ 1 FAIL. Wymus na 0x11/0x94/0x95 (valid type). Test czy lock przechodzi.
+                if let Some(v) = desc_force {
+                    if pc == 0x0029_AC84 && cpu.get_reg(0) == 0x18 { cpu.set_reg(0, v); }
                 }
                 // EKSPERYMENT (env FORCE_R5): mock komunikatu "stan bootu=1" w barierze
                 // 0x2ef9b6 stocka + wcisniecie POWER (skan zwraca 0x81). Pozwala przejsc
@@ -324,7 +372,9 @@ impl Emulator {
     /// Live force-read: odczyt `addr` bedzie zwracal `val` (test "co jesli"). Patrz unforce_read.
     pub fn force_read(&mut self, addr: u32, val: u8) { self.cpu.bus.force_reads.insert(addr, val); }
     pub fn unforce_read(&mut self, addr: u32) { self.cpu.bus.force_reads.remove(&addr); }
-    pub fn clear_forces(&mut self) { self.cpu.bus.force_reads.clear(); }
+    pub fn clear_forces(&mut self) { self.cpu.bus.force_reads.clear(); self.cpu.bus.force_reads_at.clear(); }
+    /// Force-read warunkowy: odczyt `addr` zwroci `val` TYLKO gdy CPU jest na `pc` (pc_hint).
+    pub fn force_read_at(&mut self, pc: u32, addr: u32, val: u8) { self.cpu.bus.force_reads_at.insert((pc, addr), val); }
     pub fn total_steps(&self) -> u64 { self.total_steps }
 }
 

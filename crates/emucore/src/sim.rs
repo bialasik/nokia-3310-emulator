@@ -41,6 +41,9 @@ pub struct Sim {
     pub tx_bytes: Vec<u8>,
     /// Bufor zbieranej komendy TPDU (T=0): CLA INS P1 P2 P3 [+dane].
     apdu: Vec<u8>,
+    /// Bufor zadania PTS/PPS (negocjacja parametrow po ATR): PPSS=0xFF PPS0 [PPS1..3] PCK.
+    /// SIM musi ODBIC zadanie (echo) - inaczej telefon resetuje karte (GSM 11.11 -> petla re-init).
+    pts: Vec<u8>,
     /// Case-3: ile bajtow danych jeszcze oczekiwanych po naglowku (telefon -> karta).
     data_expected: usize,
     /// Przygotowany bufor GET RESPONSE (FCP z ostatniego SELECT).
@@ -128,12 +131,15 @@ fn gsm_select_response(fid: u16) -> Vec<u8> {
         r[5] = fid as u8;
         r[6] = ftype; // bajt 7: typ (01=MF, 02=DF)
         r[12] = 0x0A; // bajt 13: dlugosc danych GSM (10)
-        // bajt 14: char pliku 0b10110010 = CHV1 disabled (bit7) + clock/napiecie
-        r[13] = 0xB2;
+        // bajt 14: char pliku. 0xB2 bit7=1 = CHV1 disabled (NIESPOJNE ze statusem!).
+        // SIM_FCHAR env do testow (0x32 = CHV1 enabled spojnie z byte18).
+        let envb = |k: &str, d: u8| std::env::var(k).ok()
+            .and_then(|s| u8::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).unwrap_or(d);
+        r[13] = envb("SIM_FCHAR", 0xB2);
         r[14] = df_cnt; // bajt 15: liczba DF (dzieci)
         r[15] = ef_cnt; // bajt 16: liczba EF (dzieci)
         r[16] = 0x04; // bajt 17: liczba CHV/UNBLOCK/admin (4)
-        r[18] = 0x83; // bajt 19: status CHV1 (zainicjalizowany, 3 proby)
+        r[18] = envb("SIM_CHV1", 0x83); // bajt 19: status CHV1 (zainicjalizowany, 3 proby)
         r[19] = 0x8A; // bajt 20: status UNBLOCK CHV1
         r[20] = 0x83; // bajt 21: status CHV2
         r[21] = 0x8A; // bajt 22: status UNBLOCK CHV2
@@ -176,10 +182,29 @@ fn ef_content(fid: u16) -> Vec<u8> {
     match fid {
         // ICCID (2FE2) - numer karty (BCD, swap nibbli)
         0x2FE2 => vec![0x98, 0x99, 0x99, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF1],
-        // IMSI (6F07) = 262011234567890 (MCC 262 DE, MNC 01) - poprawny format BCD swap,
-        // parity odd (15 cyfr -> low nibble bajtu 2 = 0x9). Testowy MCC 999 byl odrzucany.
-        0x6F07 => vec![0x08, 0x29, 0x26, 0x10, 0x21, 0x43, 0x65, 0x87, 0x09],
+        // IMSI (6F07) = 260011234567890 (MCC 260 PL, MNC 01 = Plus/Polkomtel) - BCD swap,
+        // parity odd (15 cyfr -> low nibble bajtu 2 = 0x9). Telefon moze byc SIMLOCK na PL operatora.
+        0x6F07 if std::env::var("SIM_IMSI_BAD").is_ok() =>
+            vec![0x08, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9],
+        0x6F07 if std::env::var("SIM_IMSI").is_ok() => {
+            // SIM_IMSI = 15 cyfr; zakoduj BCD swap z parity 9.
+            let s = std::env::var("SIM_IMSI").unwrap();
+            let digits: Vec<u8> = s.chars().filter_map(|c| c.to_digit(10)).map(|d| d as u8).collect();
+            let mut nibs = vec![0x9u8]; nibs.extend(digits);
+            while nibs.len() < 16 { nibs.push(0); }
+            let mut v = vec![0x08u8];
+            for i in 0..8 { v.push((nibs[i*2+1] << 4) | nibs[i*2]); }
+            v
+        }
+        0x6F07 => vec![0x08, 0x29, 0x06, 0x10, 0x21, 0x43, 0x65, 0x87, 0x09],
         // SIM Service Table (6F38) - ktore uslugi dostepne/aktywowane
+        0x6F38 if std::env::var("SIM_SST_BAD").is_ok() => vec![0x00; 14],
+        0x6F38 if std::env::var("SIM_SST").is_ok() => {
+            // SIM_SST = ciag hex bajtow, np. "ffffffff3f00...". Dopelnij do 14 bajtow.
+            let s = std::env::var("SIM_SST").unwrap();
+            let mut v: Vec<u8> = (0..s.len()/2).filter_map(|i| u8::from_str_radix(&s[i*2..i*2+2], 16).ok()).collect();
+            v.resize(14, 0x00); v
+        }
         0x6F38 => vec![
             0xFF, 0x3F, 0xFF, 0xFF, 0x3F, 0x00, 0x3F, 0x0F, 0x30, 0x0C, 0x00, 0x00, 0x00, 0xC0,
         ],
@@ -245,6 +270,7 @@ impl Sim {
             rx_delay: 0,
             tx_bytes: Vec::new(),
             apdu: Vec::new(),
+            pts: Vec::new(),
             data_expected: 0,
             gr: Vec::new(),
             selected: 0x3F00,
@@ -378,7 +404,9 @@ impl Sim {
                 }
                 self.chv1_verified = true;
                 if std::env::var("SIM_LOG").is_ok() {
-                    eprintln!("[sim] VERIFY CHV P2={:#04x} -> OK", self.apdu[3]);
+                    let pdata: Vec<u8> = self.apdu.get(5..).map(|s| s.to_vec()).unwrap_or_default();
+                    let ascii: String = pdata.iter().map(|&b| if (0x30..=0x39).contains(&b) { (b as char).to_string() } else { format!("\\x{b:02x}") }).collect();
+                    eprintln!("[sim] VERIFY CHV P2={:#04x} PIN-bajty={:02x?} (ASCII={ascii}) -> OK", self.apdu[3], pdata);
                 }
                 self.queue_resp(&[0x90, 0x00]);
             }
@@ -543,10 +571,38 @@ impl Sim {
         match addr {
             REG_TXD => {
                 self.tx_bytes.push(val); // bajt komendy APDU od telefonu
+                if std::env::var("SIM_TXD_LOG").is_ok() {
+                    eprintln!("[txd] {val:#04x} (apdu_len={})", self.apdu.len());
+                }
                 if self.activated && std::env::var("SIM_ATR").is_ok() {
-                    // Komenda GSM TPDU zaczyna sie CLA=0xA0; bajty idle/guard (FF/00)
-                    // miedzy komendami pomijamy, by nie tworzyc smieciowych komend.
-                    if !self.apdu.is_empty() || val == 0xA0 {
+                    // PTS/PPS (po ATR/reset, przed komendami): PPSS=0xFF rozpoczyna negocjacje.
+                    // SIM MUSI odbic zadanie (echo) - bez tego telefon resetuje karte (3 proby ->
+                    // reset, GSM 11.11) = nasza petla re-init. Wczesniej 0xFF bylo pomijane jako guard.
+                    if !self.pts.is_empty() || (self.apdu.is_empty() && val == 0xFF) {
+                        self.pts.push(val);
+                        if self.pts.len() == 2 && self.pts[1] & 0x80 != 0 {
+                            // 2. bajt ma bit7=1 -> to nie PPS0 (RFU=0); 0xFF byl guard. Odrzuc PTS,
+                            // potraktuj biezacy bajt jak start komendy (np. 0xA0).
+                            self.pts.clear();
+                            if val == 0xA0 {
+                                self.apdu.push(val);
+                                self.apdu_step();
+                            }
+                        } else if self.pts.len() >= 2 {
+                            let pps0 = self.pts[1];
+                            // dlugosc = PPSS + PPS0 + PCK + obecne PPS1/2/3 (bity 4/5/6 PPS0)
+                            let need = 3 + (pps0 & 0x10 != 0) as usize
+                                + (pps0 & 0x20 != 0) as usize + (pps0 & 0x40 != 0) as usize;
+                            if self.pts.len() >= need {
+                                let echo = std::mem::take(&mut self.pts);
+                                if std::env::var("SIM_TXD_LOG").is_ok() {
+                                    eprintln!("[pts] echo {echo:02x?}");
+                                }
+                                self.queue_resp(&echo); // ODBICIE zadania PTS = potwierdzenie
+                            }
+                        }
+                    } else if !self.apdu.is_empty() || val == 0xA0 {
+                        // Komenda GSM TPDU (CLA=0xA0). Bajty idle/00 miedzy komendami pomijamy.
                         self.apdu.push(val);
                         self.apdu_step();
                     }
@@ -571,7 +627,12 @@ impl Sim {
                 {
                     self.activated = true;
                     self.rx_queue.clear();
-                    self.rx_queue.extend(ATR.iter().copied());
+                    // ATR konfigurowalny przez env SIM_ATR_HEX (do brute-force TA1/historycznych).
+                    let atr_bytes: Vec<u8> = std::env::var("SIM_ATR_HEX").ok()
+                        .map(|s| (0..s.len()/2).filter_map(|i| u8::from_str_radix(s.get(i*2..i*2+2).unwrap_or(""), 16).ok()).collect())
+                        .filter(|v: &Vec<u8>| !v.is_empty())
+                        .unwrap_or_else(|| ATR.to_vec());
+                    self.rx_queue.extend(atr_bytes.iter().copied());
                     self.rx_delay = RX_BYTE_DELAY;
                 }
                 // RST low (bit7=0) deaktywuje (kolejny reset wysle ATR ponownie).

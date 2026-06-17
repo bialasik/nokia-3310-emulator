@@ -139,6 +139,12 @@ fn main() {
                     emu.force_read(a, v as u8); println!("force {a:#08X}=>{:#04X}", v as u8);
                 }
             }
+            "forcepc" => {
+                // forcepc PC ADDR VAL - wymus odczyt ADDR=VAL tylko gdy CPU na PC.
+                if let (Some(pc), Some(a), Some(v)) = (args.first().and_then(|s| parse_num(s)), args.get(1).and_then(|s| parse_num(s)), args.get(2).and_then(|s| parse_num(s))) {
+                    emu.force_read_at(pc, a, v as u8); println!("forcepc @{pc:#08X}: {a:#08X}=>{:#04X}", v as u8);
+                } else { println!("err: forcepc PC ADDR VAL"); }
+            }
             "unforce" => { if let Some(a) = args.first().and_then(|s| parse_num(s)) { emu.unforce_read(a); println!("unforce {a:#08X}"); } }
             "clearf" => { emu.clear_forces(); println!("forces wyczyszczone"); }
             "key" => {
@@ -157,8 +163,68 @@ fn main() {
                         emu.set_key(EmuKey::Digit(d), false); emu.run_steps(800_000);
                     }
                     emu.set_key(EmuKey::Select, true); emu.run_steps(800_000);
-                    emu.set_key(EmuKey::Select, false); emu.run_steps(800_000);
-                    println!("[pin {code}] pc={:#08X}", emu.pc());
+                    emu.set_key(EmuKey::Select, false);
+                    // Zatrzymaj NA werdykcie: reject 0x2b0540 lub accept (kaskada) 0x2726be.
+                    let (hit, done) = emu.run_until_any(&[0x002B_0540, 0x0027_26BE], 25_000_000);
+                    let v = match hit { Some(0x002B_0540) => "REJECT(0x2b0540)", Some(0x0027_26BE) => "ACCEPT(0x2726be)", _ => "BRAK/MAX" };
+                    println!("[pin {code}] WERDYKT={v} po {done} krokach, pc={:#08X}", emu.pc());
+                }
+            }
+            "pinkeys" => {
+                // Wpisz PIN (cyfry+select) BEZ lapania werdyktu - kontrola nad reszta recznie.
+                if let Some(code) = args.first() {
+                    for ch in code.chars().filter(|c| c.is_ascii_digit()) {
+                        let d = ch.to_digit(10).unwrap() as u8;
+                        emu.set_key(EmuKey::Digit(d), true); emu.run_steps(800_000);
+                        emu.set_key(EmuKey::Digit(d), false); emu.run_steps(800_000);
+                    }
+                    emu.set_key(EmuKey::Select, true); emu.run_steps(800_000);
+                    emu.set_key(EmuKey::Select, false); emu.run_steps(200_000);
+                    println!("[pinkeys {code}] pc={:#08X}", emu.pc());
+                }
+            }
+            "msgsrc" => {
+                // Znajdz dostawe komunikatu SIM-MMI z data=0xA3 (reject) @0x2E96DA, zrzuc r0 (bufor zrodlowy).
+                let want = args.first().and_then(|s| parse_num(s)).unwrap_or(0xA3);
+                let mut found = false;
+                for _ in 0..400 {
+                    let (hit, _) = emu.run_until(0x002E_96DA, 3_000_000);
+                    if !hit { break; }
+                    let r0 = emu.get_reg(0);
+                    let dataw = emu.read32(r0 + 4);
+                    if dataw == want {
+                        println!("[msgsrc] ZNALEZIONO data={want:#X} r0(bufor)={r0:#010X} [r0+8]={:#X} kroki={}", emu.read32(r0 + 8), emu.total_steps());
+                        found = true; break;
+                    }
+                    emu.run_steps(2); // przejdz za breakpoint
+                }
+                if !found { println!("[msgsrc] nie znaleziono data={want:#X}"); }
+            }
+            "untilreg" => {
+                // untilreg ADDR REGIDX VAL [MAXITER] - zatrzymaj gdy PC==ADDR i reg[REGIDX]==VAL; raportuj lr.
+                let a = args.first().and_then(|s| parse_num(s));
+                let ri = args.get(1).and_then(|s| parse_num(s)).map(|v| v as usize);
+                let val = args.get(2).and_then(|s| parse_num(s));
+                let maxit = args.get(3).and_then(|s| parse_num(s)).unwrap_or(2000);
+                if let (Some(a), Some(ri), Some(val)) = (a, ri, val) {
+                    let mut found = false;
+                    for _ in 0..maxit {
+                        let (hit, _) = emu.run_until(a, 3_000_000);
+                        if !hit { break; }
+                        if emu.get_reg(ri) == val {
+                            println!("[untilreg] PC={a:#08X} r{ri}={val:#X} -> lr=r14={:#08X} (wolajacy) kroki={}", emu.get_reg(14), emu.total_steps());
+                            for r in 0..16 { print!("r{r:<2}={:08X} ", emu.get_reg(r)); if r%4==3 { println!(); } }
+                            found = true; break;
+                        }
+                        emu.run_steps(2);
+                    }
+                    if !found { println!("[untilreg] nie trafiono r{ri}={val:#X} @ {a:#08X}"); }
+                } else { println!("err: untilreg ADDR REGIDX VAL"); }
+            }
+            "fill" => {
+                if let (Some(a), Some(n), Some(v)) = (args.first().and_then(|s| parse_num(s)), args.get(1).and_then(|s| parse_num(s)), args.get(2).and_then(|s| parse_num(s))) {
+                    for i in 0..n { emu.write8(a + i, v as u8); }
+                    println!("[fill {a:#08X}..+{n}]={:#04X}", v as u8);
                 }
             }
             "screen" | "lcd" => dump_screen(&emu),

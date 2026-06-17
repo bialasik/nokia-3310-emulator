@@ -107,6 +107,8 @@ pub struct Machine {
     /// Live force-read (debugger): odczyt tego adresu zwraca wymuszona wartosc. Pozwala
     /// testowac "co jesli byte[X]=V" bez rebuildu. Sprawdzane na poczatku raw_read8.
     pub force_reads: std::collections::HashMap<u32, u8>,
+    /// Force-read WARUNKOWY na PC: (pc, addr) -> val. Wymusza odczyt tylko gdy pc_hint==pc.
+    pub force_reads_at: std::collections::HashMap<(u32, u32), u8>,
     /// Programowy reset CPU zazadany (zapis bitu 2 do IO_CTSI_RST). Pętla wykonania
     /// wykrywa flage i wykonuje soft-reset (PC=FW_ENTRY). Licznik = ile resetow.
     pub reset_request: bool,
@@ -171,6 +173,7 @@ impl Machine {
             wwatch_hits: Vec::new(),
             sim_gate_cnt: 0,
             force_reads: std::collections::HashMap::new(),
+            force_reads_at: std::collections::HashMap::new(),
             reset_request: false,
             reset_count: 0,
             key_irq_asserts: 0,
@@ -249,17 +252,42 @@ impl Machine {
                 // DSP skonsumowal komende MDI -> wyczysc mailbox 0x100e0 (baseband moze
                 // wyslac kolejna komende L1). Patrz dsp.rs on_dspif_write.
                 self.mmio_w16(crate::dsp::DSP_MDI_MAILBOX, 0x0000);
-                // DSP_MDI_REPLY (env): po skonsumowaniu komendy L1 (post-PIN), DSP odpowiada przez
-                // kolejke MDIRCV (wg MADos mdi.c) + FIQ_MDIRCV. Walidacja transportu: czy handler
-                // receive firmware sie uruchamia i czyta kolejke. Typ testowy 0x00, pusty payload.
-                static MR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                if dbg_flag(&MR, "DSP_MDI_REPLY") && self.tick_count > 33_000_000 {
-                    // Odpowiedz przez MDIRCV na kazdy kick. NIE konsumujemy MDISND (firmware sam nim
-                    // zarzadza; konsumpcja desynchronizowala kolejke send). Typ: env DSP_MDI_TYPE (def 0).
-                    // Payload: env DSP_MDI_PAY="w0,w1,..." (slowa hex), domyslnie pusty.
-                    let typ = std::env::var("DSP_MDI_TYPE").ok().and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
-                    let pay: Vec<u16> = std::env::var("DSP_MDI_PAY").ok().map(|s| s.split(',').filter_map(|x| u16::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default();
-                    self.mdi_send_reply(typ, &pay);
+                // MDI_CONSUME (env): prawdziwy DSP advancuje HEAD kolejki MDISND po przetworzeniu
+                // komend. Bez tego firmware widzi komendy jako nieprzetworzone i czeka/retry'uje
+                // (head=0 tail=0x34 zamrozone). Konsumujemy WSZYSTKIE komendy (HEAD->TAIL) i logujemy.
+                static MC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if dbg_flag(&MC, "MDI_CONSUME") {
+                    let mut consumed = Vec::new();
+                    while let Some((typ, pay)) = self.mdi_recv_command() {
+                        consumed.push((typ, pay));
+                        if consumed.len() >= 8 { break; }
+                    }
+                    if !consumed.is_empty() && std::env::var("MDI_LOG").is_ok() {
+                        let s: Vec<String> = consumed.iter().map(|(t, p)| format!("{{typ={t:#04x},{}w}}", p.len())).collect();
+                        eprintln!("[mdi_consume {} cmd @tick={}] {}", consumed.len(), self.tick_count, s.join(" "));
+                    }
+                    // DSP_MDI_REPLY: po skonsumowaniu komend wyslij raport L1 przez MDIRCV.
+                    // REPLY_MAP="cmd:reply,.." (hex) - reply per typ komendy (np. "51:8b,55:.."). Gdy
+                    // brak mapy: DSP_MDI_TYPE dla kazdej komendy. REPLY_FROM=tick ogranicza do post-PIN.
+                    static MR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    let reply_from: u64 = std::env::var("REPLY_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    if !consumed.is_empty() && dbg_flag(&MR, "DSP_MDI_REPLY") && self.tick_count >= reply_from {
+                        let map: std::collections::HashMap<u8, u8> = std::env::var("REPLY_MAP").ok().map(|s|
+                            s.split(',').filter_map(|kv| {
+                                let mut it = kv.split(':');
+                                let k = u8::from_str_radix(it.next()?.trim().trim_start_matches("0x"), 16).ok()?;
+                                let v = u8::from_str_radix(it.next()?.trim().trim_start_matches("0x"), 16).ok()?;
+                                Some((k, v))
+                            }).collect()).unwrap_or_default();
+                        let fallback = std::env::var("DSP_MDI_TYPE").ok().and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+                        let pay: Vec<u16> = std::env::var("DSP_MDI_PAY").ok().map(|s| s.split(',').filter_map(|x| u16::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default();
+                        let cmds: Vec<u8> = consumed.iter().map(|(t, _)| *t).collect();
+                        for ct in cmds {
+                            if let Some(&rt) = map.get(&ct).or(fallback.as_ref()) {
+                                self.mdi_send_reply(rt, &pay);
+                            }
+                        }
+                    }
                 }
             }
             None => {}
@@ -429,6 +457,11 @@ impl Machine {
         match Self::region(addr) {
             Region::Ram => self.ram[addr as usize] = val,
             Region::Mmio => self.mmio[(addr - MMIO_START) as usize] = val,
+            // Patch ROM/flash in-memory (do eksperymentow NOP/patch firmware; .fls na dysku nietkniety).
+            _ if (0x0020_0000..0x0040_0000).contains(&addr) => {
+                let off = (addr - 0x0020_0000) as usize;
+                if off < self.rom.len() { self.rom[off] = val; }
+            }
             _ => {}
         }
     }
@@ -449,6 +482,19 @@ impl Machine {
         // Live force-read (debugger): jesli adres w mapie, zwroc wymuszona wartosc.
         if !self.force_reads.is_empty() {
             if let Some(&v) = self.force_reads.get(&addr) { return v; }
+        }
+        if !self.force_reads_at.is_empty() {
+            if let Some(&v) = self.force_reads_at.get(&(self.pc_hint, addr)) { return v; }
+        }
+        // RWATCH (env): loguj (pc, tick) przy KAZDYM odczycie tego adresu - znajdz CZYTAJACYCH (np. bramke locka).
+        {
+            static R: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+            let ra = R.get_or_init(|| std::env::var("RWATCH").ok().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()));
+            if *ra == Some(addr) {
+                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 60 { eprintln!("[rwatch {addr:#08X} read#{n} @pc={:#08X} tick={}]", self.pc_hint, self.tick_count); }
+            }
         }
         // SIM_ACCEPT_STATE (env): bramka accept SIMUPL @0x29ed06 czyta byte[0x10fac7] (stan SIM);
         // jesli ==0x65/0x67 -> POST ACCEPT (msg 0x5E1 -> SIM-ready). Runtime nigdy nie osiaga 0x65/0x67
@@ -688,6 +734,27 @@ impl Machine {
         // DSPIF (0x30000): MCU kickuje DSP by przetworzyl komende MDI z mailboxa -> DSP
         // konsumuje (czysci 0x100e0) po opoznieniu. Odblokowuje petle L1 baseband.
         if addr == crate::dsp::REG_DSPIF {
+            // MDI_SND_LOG: peek kolejki MDISND (MCU->DSP) przy kicku - jakie komendy L1 firmware
+            // wysyla (bez konsumpcji: czytamy HEAD..TAIL i logujemy {rozmiar,typ}).
+            static SL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if dbg_flag(&SL, "MDI_SND_LOG") {
+                let head = self.dsp_r16(0x0001_00A6);
+                let tail = self.dsp_r16(0x0001_00A4);
+                let mut h = head;
+                let mut parts = Vec::new();
+                for _ in 0..16 {
+                    if h == tail { break; }
+                    if h >= 0x52 { h = 0; }
+                    let ctrl = self.dsp_r16(0x0001_0000 + h as u32 * 2);
+                    parts.push(format!("{{sz={},typ={:#04x}}}", ctrl >> 8, ctrl & 0xFF));
+                    let words = ((ctrl >> 8) as usize).div_ceil(2);
+                    h = h.wrapping_add(1 + words as u16);
+                    while h >= 0x52 { h -= 0x52; }
+                }
+                if !parts.is_empty() {
+                    eprintln!("[mdisnd kick head={head:#x} tail={tail:#x} tick={}] {}", self.tick_count, parts.join(" "));
+                }
+            }
             self.dsp.on_dspif_write(val);
         }
         // Routing LCD (GENSIO -> PCD8544).
