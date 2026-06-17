@@ -159,7 +159,7 @@ impl Emulator {
                 // LOOP_BREAK: re-init SIM pada gdy 0x29AA40 (krok sesji SIM) zwraca 1 -> switch @0x29B90A.
                 // Punkt zweryfikowany BTRACE: 0x29BBDA (cmp r0,0x38) tuz po bl 0x29AA40. Wymus r0!=1
                 // (LOOP_BREAK=wartosc stanu) -> inna galaz switcha zamiast re-init. Sweep by znalezc progres.
-                if loop_break && pc == 0x0029_BBDA && cpu.get_reg(0) == 1 {
+                if loop_break && pc == 0x0029_BBDA && (cpu.get_reg(0) == 1 || cpu.get_reg(0) == 3) {
                     cpu.set_reg(0, loop_break_val);
                 }
                 // DESC_FORCE: SIMUPL klasyfikuje deskryptor poziomu byte[sp+2] (@0x29AC84 r0) - placeholder
