@@ -788,6 +788,11 @@ impl Machine {
         }
         // SIM (UART ISO-7816).
         if (SIM_BASE..SIM_END).contains(&addr) && self.sim.write(addr, val) {
+            // SIM_TXD_PC: loguj PC firmware piszacy bajt TXD (znajdz rutyne wysylki SIM -> caller re-read).
+            static TP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if addr == 0x0002_0036 && dbg_flag(&TP, "SIM_TXD_PC") {
+                eprintln!("[txd_pc] @{:#08X} val={val:#04x}", self.pc_hint);
+            }
             return;
         }
         // Rejestry CTSE (kontroler przerwan/timer).

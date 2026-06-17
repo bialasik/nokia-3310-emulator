@@ -359,6 +359,17 @@ impl Sim {
                         return;
                     }
                 }
+                // Pliki nieistniejace (np. 7F40 - niestandardowy DF, nie ma w GSM 11.11): prawdziwa
+                // karta zwraca "file not found" (94 04). Nasz SIM mowil "istnieje" -> telefon
+                // eksplorowal smieci -> petla re-czytania. Env SIM_NF="7f40,..." = lista not-found.
+                let nf: bool = std::env::var("SIM_NF").ok()
+                    .map(|s| s.split(',').filter_map(|x| u16::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).any(|f| f == fid))
+                    .unwrap_or(false);
+                if nf {
+                    if std::env::var("SIM_LOG").is_ok() { eprintln!("[sim] SELECT {fid:#06x} -> NOT FOUND (94 04)"); }
+                    self.queue_resp(&[0x94, 0x04]);
+                    return;
+                }
                 self.selected = fid;
                 self.gr = gsm_select_response(fid);
                 self.queue_resp(&[0x9F, self.gr.len() as u8]); // dane dostepne -> GET RESPONSE
@@ -574,11 +585,12 @@ impl Sim {
                 if std::env::var("SIM_TXD_LOG").is_ok() {
                     eprintln!("[txd] {val:#04x} (apdu_len={})", self.apdu.len());
                 }
+                let pts_on = std::env::var("SIM_NO_PTS").is_err();
                 if self.activated && std::env::var("SIM_ATR").is_ok() {
                     // PTS/PPS (po ATR/reset, przed komendami): PPSS=0xFF rozpoczyna negocjacje.
                     // SIM MUSI odbic zadanie (echo) - bez tego telefon resetuje karte (3 proby ->
                     // reset, GSM 11.11) = nasza petla re-init. Wczesniej 0xFF bylo pomijane jako guard.
-                    if !self.pts.is_empty() || (self.apdu.is_empty() && val == 0xFF) {
+                    if pts_on && (!self.pts.is_empty() || (self.apdu.is_empty() && val == 0xFF)) {
                         self.pts.push(val);
                         if self.pts.len() == 2 && self.pts[1] & 0x80 != 0 {
                             // 2. bajt ma bit7=1 -> to nie PPS0 (RFU=0); 0xFF byl guard. Odrzuc PTS,
