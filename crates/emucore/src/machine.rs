@@ -90,6 +90,8 @@ pub struct Machine {
     pub sim: Sim,
     /// Peryferia wyjsciowe: brzeczyk, wibracja, LED, watchdog.
     pub periph: Periph,
+    /// Buzzer PUP (audio): dzielnik czest. + glosnosc + enable (rej. 0x20015/1C/1D/1E).
+    pub buzzer: crate::buzzer::Buzzer,
     /// Model DSP (TMS320 baseband): boot/upload handshake + gotowosc (IRQ_DSP).
     pub dsp: Dsp,
     /// Uklad flash (Intel/ST CFI): komendy erase/program/status na kopii ROM w pamieci.
@@ -177,6 +179,7 @@ impl Machine {
             mbus: Mbus::new(),
             sim: Sim::new(),
             periph: Periph::new(),
+            buzzer: crate::buzzer::Buzzer::new(),
             dsp: Dsp::new(),
             flash: Flash::new(),
             lcd_last_cmd_pc: 0,
@@ -793,6 +796,8 @@ impl Machine {
         };
         // Peryferia wyjsciowe (brzeczyk/wibracja/LED/WDT): obserwuj stan (nie konsumuje).
         self.periph.observe_write(addr, val);
+        // Buzzer PUP (audio): obserwuj dzielnik czest./glosnosc/enable.
+        self.buzzer.observe_write(addr, val);
         // DSP: zapis IO_CTSI_DSP (0x20002) bit0 = wlaczenie -> start bootu DSP.
         if addr == REG_CTSI_DSP {
             self.dsp.on_ctsi_dsp_write(val);

@@ -378,6 +378,8 @@ impl Emulator {
     pub fn total_steps(&self) -> u64 { self.total_steps }
     /// Suma cykli CPU (model wait-states). Srednie CPI = total_cycles / total_steps.
     pub fn total_cycles(&self) -> u64 { self.cpu.bus.total_cycles }
+    /// Stan buzzera do syntezy audio: (czestotliwosc_Hz, glosnosc 0..255, czy_gra).
+    pub fn buzzer_state(&self) -> (u32, u8, bool) { self.cpu.bus.buzzer.state() }
     /// Wait-states flasha (regulacja tempa live).
     pub fn flash_ws(&self) -> u32 { self.cpu.bus.flash_ws() }
     pub fn set_flash_ws(&mut self, ws: u32) { self.cpu.bus.set_flash_ws(ws); }

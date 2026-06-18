@@ -2,6 +2,7 @@
 //! - `loader`  - skladanie obrazu flasha 0x000000..0x400000 z plikow .fls
 //! - `machine` - magistrala (MemoryInterface) z routingiem flash/scratch + tracer MMIO
 
+pub mod buzzer;
 pub mod ccont;
 pub mod ctsi;
 pub mod dsp;

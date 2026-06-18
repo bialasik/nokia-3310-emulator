@@ -8,6 +8,7 @@
 //!   Esc - wyjscie
 //!   (mapowanie klawiatury na klawiature telefonu: M4)
 
+mod audio;
 mod font;
 mod lcd;
 mod ui;
@@ -91,6 +92,16 @@ fn main() {
     // repetuje trzymany klawisz - wiec na krawedzi narastajacej dajemy puls ~PULSE_CYCLES
     // (pod-klatkowo, dzielony run_steps) i potem klawisz pozostaje PUSZCZONY mimo trzymania.
 
+    // Audio buzzera (cpal). None = brak urzadzenia/formatu -> gra bez dzwieku. NO_AUDIO=1 wylacza.
+    let audio = if std::env::var("NO_AUDIO").is_ok() {
+        None
+    } else {
+        match audio::Buzzer::new() {
+            Some(a) => { println!("[audio] buzzer aktywny"); Some(a) }
+            None => { eprintln!("[audio] brak wyjscia audio - gra bez dzwieku"); None }
+        }
+    };
+
     // Pacing do prawdziwego zegara 13 MHz: budzet krokow rosnie z czasem sciany,
     // z limitem (nie nadrabiamy wiecej niz 50 ms naraz - brak spirali smierci).
     let mut last = Instant::now();
@@ -161,6 +172,11 @@ fn main() {
                 // Samokorekta budzetu: odejmij RZECZYWIScie zuzyte cykle (nie estymate).
                 let consumed = e.total_cycles() - cyc0;
                 budget -= consumed as f64;
+                // Audio: zaktualizuj buzzer stanem sprzetowych rejestrow PUP.
+                if let Some(a) = &audio {
+                    let (bf, bv, bp) = e.buzzer_state();
+                    a.update(bf, bv, bp);
+                }
                 // Aktualizuj estymate CPI z faktycznego zuzycia (sledzi WS zmieniane Z/X).
                 if n > 0 {
                     cpi_est = (consumed as f64 / n as f64).clamp(1.0, 80.0);

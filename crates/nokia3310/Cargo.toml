@@ -7,3 +7,4 @@ description = "Emulator sprzetowy Nokia 3310 (DCT3) - frontend / ekran LCD"
 [dependencies]
 minifb = "0.27"
 emucore = { path = "../emucore" }
+cpal = "0.15"
