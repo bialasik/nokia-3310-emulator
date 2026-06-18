@@ -47,9 +47,17 @@ pub struct Ctsi {
     pub timer_fiq_bit: u8,
     /// Czy generowac systemowy tick IRQ (env TIMER_IRQ, domyslnie tak - stock; MADos=0).
     irq_tick_enabled: bool,
-    /// Ile krokow CPU na 1 tick TMR0 (env TIMER_STEP_DIV).
-    step_div: u32,
-    step_ctr: u32,
+    /// TMR0 = "Programmable timer counter" (MAME), zegar 33055/(TMR0D+1) Hz. Firmware czyta go
+    /// jako baze opoznien (m.in. delay miedzy skanami klawiatury) i napedza nim PTIMER.
+    /// `tmr0_period` = cykle CPU na 1 tick = 13e6*(TMR0D+1)/33055. Wczesniej staly step_div
+    /// (12695 Hz) ~98x za szybko -> auto-repeat za szybki. env TIMER_STEP_DIV nadpisuje na stale.
+    tmr0_period: u32,
+    tmr0_ctr: u32,
+    tmr0d: u8,
+    step_div_override: Option<u32>,
+    /// TMR1 = "Sleep clock counter" (MAME), 1057 Hz. Baza czasu firmware (lib_get_time = TMR1*1000/1057).
+    tmr1_period: u32,
+    tmr1_ctr: u32,
 
     /// MBUSTIM (FIQ bit 3) - staly tick systemowy ~423.1 Hz stockowego firmware'u.
     /// Niezalezny od TMR0 (ktory napedza PTIMER=bit 4). 0 = wylaczony (env MBUSTIM_DIV).
@@ -68,6 +76,11 @@ impl Default for Ctsi {
 }
 
 impl Ctsi {
+    /// Cykle CPU na 1 tick TMR0 = 13e6*(TMR0D+1)/33055 (zegar 33055/(TMR0D+1) Hz; MAME).
+    fn tmr0_period_for(tmr0d: u8) -> u32 {
+        ((13_000_000u64 * (tmr0d as u64 + 1)) / 33055).max(1) as u32
+    }
+
     pub fn new() -> Self {
         // Mapa FIQ (z MADos hw/int.h): bit 3 = MBUSTIM (staly tick ~423.1 Hz, glowny
         // timebase OS), bit 4 = PTIMER (programowalny, napedzany TMR0). TMR0-timer pali
@@ -76,11 +89,14 @@ impl Ctsi {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(4);
-        let step_div = std::env::var("TIMER_STEP_DIV")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1024)
-            .max(1);
+        // TIMER_STEP_DIV: jesli ustawione, nadpisuje okres TMR0 na stale (do tuningu/bootu).
+        let step_div_override: Option<u32> = std::env::var("TIMER_STEP_DIV")
+            .ok().and_then(|s| s.parse().ok()).map(|v: u32| v.max(1));
+        let tmr0d: u8 = 0xFF; // reset MAME: timer0 = 33055/(255+1) = 129 Hz
+        let tmr0_period = step_div_override.unwrap_or_else(|| Self::tmr0_period_for(tmr0d));
+        // TMR1 (sleep clock) 1057 Hz => 13e6/1057 ≈ 12299 cykli. env TMR1_DIV nadpisuje.
+        let tmr1_period = std::env::var("TMR1_DIV").ok().and_then(|s| s.parse().ok())
+            .unwrap_or(12299u32).max(1);
         // MBUSTIM ~423.1 Hz @ 13 MHz => co ~30733 instrukcji. Domyslnie wlaczony (stock);
         // MADos uruchamiamy z MBUSTIM_DIV=0.
         let mbustim_div = std::env::var("MBUSTIM_DIV")
@@ -107,8 +123,12 @@ impl Ctsi {
             // Domyslnie WYLACZONY; IRQ ma przychodzic z realnych zrodel. Env TIMER_IRQ=1 wlacza.
             irq_tick_enabled: std::env::var("TIMER_IRQ").map(|v| v == "1").unwrap_or(false),
             timer_fiq_bit,
-            step_div,
-            step_ctr: 0,
+            tmr0_period,
+            tmr0_ctr: 0,
+            tmr0d,
+            step_div_override,
+            tmr1_period,
+            tmr1_ctr: 0,
             mbustim_div,
             mbustim_ctr: 0,
             timer_autoreload: std::env::var("TIMER_AUTORELOAD").map(|v| v == "1").unwrap_or(false),
@@ -161,7 +181,19 @@ impl Ctsi {
                     self.irq_en = false;
                 }
             }
-            TMR0D => {} // dzielnik - pomijamy
+            TMR0D => {
+                // Dzielnik TMR0: firmware ustawia czestotliwosc 33055/(TMR0D+1) Hz.
+                self.tmr0d = val;
+                if let Some(ov) = self.step_div_override {
+                    self.tmr0_period = ov;
+                } else {
+                    self.tmr0_period = Self::tmr0_period_for(val);
+                }
+                if std::env::var("TMR0D_LOG").is_ok() {
+                    eprintln!("[tmr0d] TMR0D={val:#04x} -> tmr0_period={} cykli ({} Hz)",
+                        self.tmr0_period, 13_000_000 / self.tmr0_period.max(1));
+                }
+            }
             // Zapis licznika TMR0 (firmware moze go RESETOWAC, np. =0, przed uzbrojeniem
             // targetu): bez tego wolnobiezny tmr0 przelatuje staly target i FIQ nie pada.
             TMR0_HI => self.tmr0 = (self.tmr0 & 0x00FF) | ((val as u16) << 8),
@@ -179,21 +211,28 @@ impl Ctsi {
         true
     }
 
-    /// Krok timera (wolany co krok CPU). Po elapsed ustawia bit FIQ timera w latchu.
-    pub fn tick(&mut self) {
+    /// Krok timera. `cycles` = cykle CPU od ostatniego wywolania (model wait-states).
+    /// W trybie instrukcyjnym (CYCLE_TIMING off) wolane z cycles=1 (jak dawniej).
+    pub fn tick(&mut self, cycles: u32) {
         // MBUSTIM (bit 3) - staly tick systemowy stockowego firmware'u (~423 Hz).
         if self.mbustim_div > 0 {
-            self.mbustim_ctr += 1;
-            if self.mbustim_ctr >= self.mbustim_div {
-                self.mbustim_ctr = 0;
+            self.mbustim_ctr += cycles;
+            while self.mbustim_ctr >= self.mbustim_div {
+                self.mbustim_ctr -= self.mbustim_div;
                 self.fiq_latch |= 1 << 3;
             }
         }
-        self.step_ctr += 1;
-        if self.step_ctr >= self.step_div {
-            self.step_ctr = 0;
-            self.tmr0 = self.tmr0.wrapping_add(1);
+        // TMR1 (sleep clock, 0x04/05) - niezalezny zegar 1057 Hz; baza czasu firmware.
+        self.tmr1_ctr += cycles;
+        while self.tmr1_ctr >= self.tmr1_period {
+            self.tmr1_ctr -= self.tmr1_period;
             self.tmr1 = self.tmr1.wrapping_add(1);
+        }
+        // TMR0 (programmable timer counter, 0x10/11) - 33055/(TMR0D+1) Hz; napedza tez PTIMER.
+        self.tmr0_ctr += cycles;
+        while self.tmr0_ctr >= self.tmr0_period {
+            self.tmr0_ctr -= self.tmr0_period;
+            self.tmr0 = self.tmr0.wrapping_add(1);
             if self.timer_armed && self.tmr0 == self.tmr0_target {
                 // Bit FIQL ustawiamy tylko gdy < 8 (stock firmware). Dla MADos timer to
                 // wylacznie FIQ8 (PUP_FIQ8) - ustawienie zbednego bitu FIQL wywoluje

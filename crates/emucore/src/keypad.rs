@@ -68,6 +68,23 @@ fn matrix_pos(code: u8) -> Option<(u8, u8)> {
     })
 }
 
+/// WSZYSTKIE pozycje matrycy dla danego kodu. Klawisz "1" (0x01) wystepuje w DWoCH miejscach
+/// keymapu (row1,col2 i row1,col4) - fizyczny klawisz zwiera obie kolumny. Prezentacja tylko
+/// jednej dawala firmware niespojny stan -> "1" zachowywal sie jak long-press (ksiazka tel.).
+fn matrix_positions(code: u8) -> Vec<(u8, u8)> {
+    const M: [u8; 25] = [
+        0x3e, 0x17, 0x0a, 0x3e, 0x1a,
+        0x3e, 0x18, 0x01, 0x02, 0x01,
+        0x3e, 0x3e, 0x06, 0x05, 0x04,
+        0x3e, 0x3e, 0x09, 0x08, 0x07,
+        0x3e, 0x03, 0x0b, 0x19, 0x0c,
+    ];
+    M.iter().enumerate()
+        .filter(|(_, &c)| c == code)
+        .map(|(idx, _)| ((idx / 5) as u8, (idx % 5) as u8))
+        .collect()
+}
+
 pub struct Keypad {
     kpd_r: u8,
     /// IO_UIF_DIR_R (0x200a8): maska sterowanych wierszy ze skanu.
@@ -86,6 +103,12 @@ pub struct Keypad {
     /// kolumny opadnie (klawisz wcisniety/zwolniony). Handler 0x2e9844 ackuje 0x2006b
     /// i skanuje matryce. Bez tego firmware NIGDY nie skanuje klawiatury w idle.
     pub key_irq_pending: bool,
+    /// KEYLOG: loguj skany w ktorych firmware widzi klawisz (cols != 0x7f) - co i kiedy widzi.
+    key_log: bool,
+    /// Anty-auto-repeat (event-driven): po ZAREJESTROWANIU eventu nowego klawisza przez firmware
+    /// (zapis kodu do 0x111b6f) prezentujemy klawisz matrycy jako PUSZCZONY mimo trzymania -
+    /// firmware nie wchodzi w petle repeatu (~66 skanow). Czyszczone przy fizycznym puszczeniu.
+    suppress: std::cell::Cell<bool>,
 }
 
 impl Default for Keypad {
@@ -112,11 +135,19 @@ impl Keypad {
             read_c_count: std::cell::Cell::new(0),
             read_c_hit: std::cell::Cell::new(0),
             key_irq_pending: false,
+            key_log: std::env::var("KEYLOG").is_ok(),
+            suppress: std::cell::Cell::new(false),
         }
     }
 
-    pub fn tick(&mut self) {
-        self.steps += 1;
+    /// Firmware zarejestrowal event nowego klawisza -> puszczamy matryce (anty-repeat).
+    /// Wlaczane env KPD_ANTIREPEAT (domyslnie wl.); KPD_ANTIREPEAT=0 wylacza.
+    pub fn suppress_after_event(&self) {
+        self.suppress.set(true);
+    }
+
+    pub fn tick(&mut self, cycles: u32) {
+        self.steps += cycles as u64;
     }
 
     pub fn write_r(&mut self, val: u8) {
@@ -155,14 +186,15 @@ impl Keypad {
         self.read_c_count.set(self.read_c_count.get() + 1);
         let mut cols = 0x7Fu8;
         match self.single_row() {
-            // Tryb per-wiersz: tylko klawisze z adresowanego wiersza.
-            Some(row) => {
+            // Tryb per-wiersz: klawisze z wiersza, o ile nie tlumimy po zarejestrowanym evencie.
+            Some(row) if !self.suppress.get() => {
                 for &(r, colbit) in &self.pressed {
                     if r == row {
                         cols &= !(1 << colbit);
                     }
                 }
             }
+            Some(_) => {} // suppress: matryca prezentowana jako puszczona (anty-repeat)
             // Tryb "wszystkie wiersze naraz" (DIR_R=0x1f/0xe0/0): firmware używa go do
             // detekcji linii DEDYKOWANYCH (POWER = bit kolumny 1 => kod 0x81), NIE matrycy.
             // Scan 0x2e98f0 robi pre-check (DIR_R=0xe0); gdy all-rows == 0x1f (brak
@@ -177,6 +209,10 @@ impl Keypad {
         }
         if cols != 0x7F {
             self.read_c_hit.set(self.read_c_hit.get() + 1);
+            if self.key_log {
+                // Ktora kolumna opadla (klawisz) + wiersz -> identyfikuje klawisz; steps=cykle.
+                eprintln!("[fw_scan] row={:?} cols={:#04x} cyc={}", self.single_row(), cols, self.steps);
+            }
         }
         if !self.pressed.is_empty() && kpd_rc_flag() {
             eprintln!(
@@ -189,7 +225,19 @@ impl Keypad {
 
     /// Wciśnięcie klawisza po kodzie (KEY_UP/DOWN/MENU/CANCEL lub cyfra wg matrycy).
     pub fn press_code(&mut self, code: u8) {
-        if let Some(pos) = matrix_pos(code) {
+        let positions = matrix_positions(code);
+        if positions.is_empty() {
+            if kpd_dbg_flag() {
+                eprintln!("[kpd] press {:#04x} -> BRAK pozycji w matrycy!", code);
+            }
+            return;
+        }
+        // Nowe nacisniecie z pustego stanu = czysc tlumienie (nowy event moze sie zarejestrowac).
+        if self.pressed.is_empty() {
+            self.suppress.set(false);
+        }
+        // Zwieramy WSZYSTKIE kolumny przypisane do kodu (klawisz "1" zwiera dwie).
+        for pos in positions {
             if !self.pressed.contains(&pos) {
                 self.pressed.push(pos);
                 self.key_irq_pending = true; // opadajaca linia kolumny -> IRQ klawiatury
@@ -197,16 +245,18 @@ impl Keypad {
                     eprintln!("[kpd] press {:#04x} -> {:?} (irq set)", code, pos);
                 }
             }
-        } else if kpd_dbg_flag() {
-            eprintln!("[kpd] press {:#04x} -> BRAK pozycji w matrycy!", code);
         }
     }
     pub fn release_code(&mut self, code: u8) {
-        if let Some(pos) = matrix_pos(code) {
+        for pos in matrix_positions(code) {
             if self.pressed.iter().any(|&k| k == pos) {
                 self.pressed.retain(|&k| k != pos);
                 self.key_irq_pending = true; // zmiana stanu linii -> IRQ (detekcja zwolnienia)
             }
+        }
+        // Fizyczne puszczenie (matryca pusta) -> zeruj tlumienie (kolejny nacisk zadziala).
+        if self.pressed.is_empty() {
+            self.suppress.set(false);
         }
     }
 

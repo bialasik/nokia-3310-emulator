@@ -100,6 +100,10 @@ fn main() {
                 println!("[untilany] {:?} po {done}, pc={:#08X}", hit.map(|p| format!("{p:#08X}")), emu.pc());
             }
             "pc" => println!("pc={:#08X}", emu.pc()),
+            "cyc" => {
+                let (s, c) = (emu.total_steps(), emu.total_cycles());
+                println!("steps={s} cycles={c} CPI={:.3}", c as f64 / s.max(1) as f64);
+            }
             "state" => println!("pc={:#08X} crashed={} lcd_writes={} clock={:?} kroki={}",
                 emu.pc(), emu.crashed, emu.lcd_data_writes(), emu.clock(), emu.total_steps()),
             "reg" => {

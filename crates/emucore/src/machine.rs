@@ -136,6 +136,19 @@ pub struct Machine {
     selftest_sub: bool,
     force_hw: bool,
     force_rdy: bool,
+    /// Model cykli ARM7TDMI: koszt dostepu zalezy od regionu (flash z wait-states wolny,
+    /// RAM szybki). `total_cycles` rosnie w load/store/idle_cycle; `pending_cycles` = cykle
+    /// od ostatniego tick_timer. Przy CYCLE_TIMING timery tykaja CYKLAMI (nie instrukcjami),
+    /// dzieki czemu jedna instrukcja = kilka cykli -> firmware postrzega realny czas, CPU @13MHz.
+    pub total_cycles: u64,
+    pending_cycles: u32,
+    flash_ws: u32,
+    ram_ws: u32,
+    cycle_timing: bool,
+    /// KEYLOG: loguj odczyty firmware z tablicy keymap (0x33043c) - co firmware rozpoznaje.
+    key_log: bool,
+    /// Anty-auto-repeat klawiatury (event-driven, domyslnie wl.; KPD_ANTIREPEAT=0 wylacza).
+    kpd_antirepeat: bool,
 }
 
 impl Machine {
@@ -191,8 +204,32 @@ impl Machine {
             selftest_sub: std::env::var("SELFTEST_SUB").is_ok(),
             force_hw: std::env::var("FORCE_HW").is_ok(),
             force_rdy: std::env::var("FORCE_RDY").is_ok(),
+            total_cycles: 0,
+            pending_cycles: 0,
+            // Wait-states (cykle na dostep). Flash DCT3 (~70-120ns @ 13MHz=77ns/cykl) ~2 cykle
+            // na 16-bit; 32-bit = 2x (szyna 16-bit). RAM wewnetrzny 1 cykl. Tunowalne do kalibracji.
+            flash_ws: std::env::var("FLASH_WS").ok().and_then(|s| s.parse().ok()).unwrap_or(2).max(1),
+            ram_ws: std::env::var("RAM_WS").ok().and_then(|s| s.parse().ok()).unwrap_or(1).max(1),
+            cycle_timing: std::env::var("CYCLE_TIMING").map(|v| v == "1").unwrap_or(false),
+            key_log: std::env::var("KEYLOG").is_ok(),
+            kpd_antirepeat: std::env::var("KPD_ANTIREPEAT").map(|v| v == "1").unwrap_or(false),
         }
     }
+
+    /// Koszt dostepu do pamieci w cyklach (model wait-states ARM7TDMI). Flash wolny, RAM szybki.
+    #[inline]
+    fn access_cost(&self, addr: u32, width_bytes: u32) -> u32 {
+        if (ROM_START..ROM_END).contains(&addr) {
+            // Szyna flash 16-bit: dostep 32-bit = dwa 16-bitowe.
+            if width_bytes >= 4 { 2 * self.flash_ws } else { self.flash_ws }
+        } else {
+            self.ram_ws
+        }
+    }
+
+    /// Wait-states flasha (cykle na dostep 16-bit) - glowny mnoznik tempa. Regulacja live (Z/X).
+    pub fn flash_ws(&self) -> u32 { self.flash_ws }
+    pub fn set_flash_ws(&mut self, ws: u32) { self.flash_ws = ws.clamp(1, 64); }
 
     /// Krok urzadzen czasowych (timer CTSI + klawiatura) - wolac co krok CPU.
     /// Czysty odczyt 32-bit big-endian z RAM (skan stosu/debug) - BEZ efektow ubocznych
@@ -206,10 +243,27 @@ impl Machine {
         }
     }
 
+    /// Anty-auto-repeat: wolane gdy PC wejdzie w sciezke repeatu klawiatury (0x29177c).
+    /// To nastepuje DOPIERO po zarejestrowaniu nowego eventu (rejestracja nietknieta), wiec
+    /// puszczenie klawisza tu blokuje petle repeatu bez psucia wpisania klawisza.
+    #[inline]
+    pub fn keypad_repeat_hook(&self, pc: u32) {
+        if self.kpd_antirepeat && pc == 0x0029_177C {
+            self.keypad.suppress_after_event();
+        }
+    }
+
     pub fn tick_timer(&mut self) {
-        self.ctsi.tick();
-        self.keypad.tick();
-        self.ccont.tick(); // zegar RTC CCONT tika
+        // Cykle wykonanej instrukcji (z load/store/idle_cycle, model wait-states). Min 1
+        // (kazda instrukcja ma co najmniej pobranie). W trybie CYCLE_TIMING timery tykaja
+        // CYKLAMI -> jedna instrukcja postepuje czas o kilka cykli (realny zegar, CPU @13MHz).
+        let cyc = self.pending_cycles.max(1);
+        self.pending_cycles = 0;
+        self.total_cycles += cyc as u64;
+        let adv = if self.cycle_timing { cyc } else { 1 };
+        self.ctsi.tick(adv);
+        self.keypad.tick(adv);
+        self.ccont.tick(adv); // zegar RTC CCONT tika
         self.tick_count = self.tick_count.wrapping_add(1);
         // TEST heartbeat: cyklicznie zeruj flage uspienia (wybudza petle idle bez efektow
         // ubocznych przerwania). Diagnoza hipotezy "startup potrzebuje cyklicznego ticka".
@@ -479,6 +533,14 @@ impl Machine {
     }
 
     fn raw_read8(&mut self, addr: u32) -> u8 {
+        // KEYLOG: firmware czyta keymap @0x33043c (25 bajtow) by przetlumaczyc (wiersz,kol)->kod.
+        // Odczyt z realnym kodem (!=0x3e pusty) = firmware rozpoznal klawisz w skanie.
+        if self.key_log && (0x0033_043C..0x0033_0455).contains(&addr) {
+            let v = self.rom.get((addr - ROM_START) as usize).copied().unwrap_or(0xFF);
+            if v != 0x3e && v != 0xff {
+                eprintln!("[fw_key] code={:#04x} @pc={:#08X} cyc={}", v, self.pc_hint, self.total_cycles);
+            }
+        }
         // Live force-read (debugger): jesli adres w mapie, zwroc wymuszona wartosc.
         if !self.force_reads.is_empty() {
             if let Some(&v) = self.force_reads.get(&addr) { return v; }
@@ -569,7 +631,11 @@ impl Machine {
         }
         // Klawiatura: odczyt kolumn (KPD_C).
         if addr == REG_KPD_C {
-            return self.keypad.read_c();
+            let v = self.keypad.read_c();
+            if self.key_log && v != 0x7f {
+                eprintln!("[fw_kpd] pc={:#08X} cols={:#04x} cyc={}", self.pc_hint, v, self.total_cycles);
+            }
+            return v;
         }
         // Test-bypass (env FORCE_ST): flaga self-testu 0x11ff15 - wymus bit6=1 (0x40).
         // Renderer CONTACT (fcn.00244620 case0) sprawdza `bit6==0 -> CONTACT`. Bit6 =
@@ -837,6 +903,7 @@ enum Region {
 
 impl MemoryInterface for Machine {
     fn load_8(&mut self, addr: u32, _a: MemoryAccess) -> u8 {
+        self.pending_cycles += self.access_cost(addr, 1);
         let v = self.raw_read8(addr);
         if Self::loggable(addr) {
             self.bump_counters(addr, false);
@@ -847,6 +914,7 @@ impl MemoryInterface for Machine {
     }
 
     fn load_16(&mut self, addr: u32, _a: MemoryAccess) -> u16 {
+        self.pending_cycles += self.access_cost(addr, 2);
         let a = addr & !1;
         // Firmware DCT3 jest BIG-ENDIAN.
         let v = u16::from_be_bytes([self.raw_read8(a), self.raw_read8(a + 1)]);
@@ -874,6 +942,7 @@ impl MemoryInterface for Machine {
     }
 
     fn load_32(&mut self, addr: u32, _a: MemoryAccess) -> u32 {
+        self.pending_cycles += self.access_cost(addr, 4);
         let a = addr & !3;
         // Firmware DCT3 jest BIG-ENDIAN.
         let v = u32::from_be_bytes([
@@ -892,6 +961,7 @@ impl MemoryInterface for Machine {
     }
 
     fn store_8(&mut self, addr: u32, value: u8, _a: MemoryAccess) {
+        self.pending_cycles += self.access_cost(addr, 1);
         // Region flash: komenda/dane do FSM flash (na kopii ROM, plik nietkniety).
         if matches!(Self::region(addr), Region::Rom) {
             self.flash_write(addr, value as u16);
@@ -905,6 +975,7 @@ impl MemoryInterface for Machine {
     }
 
     fn store_16(&mut self, addr: u32, value: u16, _a: MemoryAccess) {
+        self.pending_cycles += self.access_cost(addr, 2);
         let a = addr & !1;
         // Region flash: komenda/dane 16-bit do FSM flash.
         if matches!(Self::region(a), Region::Rom) {
@@ -922,6 +993,7 @@ impl MemoryInterface for Machine {
     }
 
     fn store_32(&mut self, addr: u32, value: u32, _a: MemoryAccess) {
+        self.pending_cycles += self.access_cost(addr, 4);
         let a = addr & !3;
         // Region flash: dwa slowa 16-bit do FSM flash (BIG-ENDIAN).
         if matches!(Self::region(a), Region::Rom) {
@@ -940,7 +1012,9 @@ impl MemoryInterface for Machine {
         }
     }
 
-    fn idle_cycle(&mut self) {}
+    fn idle_cycle(&mut self) {
+        self.pending_cycles += 1;
+    }
 }
 
 // =================== BusIO / DebugRead (bez logowania) ===================

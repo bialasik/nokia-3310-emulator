@@ -376,10 +376,15 @@ impl Emulator {
     /// Force-read warunkowy: odczyt `addr` zwroci `val` TYLKO gdy CPU jest na `pc` (pc_hint).
     pub fn force_read_at(&mut self, pc: u32, addr: u32, val: u8) { self.cpu.bus.force_reads_at.insert((pc, addr), val); }
     pub fn total_steps(&self) -> u64 { self.total_steps }
+    /// Suma cykli CPU (model wait-states). Srednie CPI = total_cycles / total_steps.
+    pub fn total_cycles(&self) -> u64 { self.cpu.bus.total_cycles }
+    /// Wait-states flasha (regulacja tempa live).
+    pub fn flash_ws(&self) -> u32 { self.cpu.bus.flash_ws() }
+    pub fn set_flash_ws(&mut self, ws: u32) { self.cpu.bus.set_flash_ws(ws); }
 }
 
 /// Klawisze telefonu (mapowane przez frontend z klawiatury PC).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum EmuKey {
     Up,
     Down,

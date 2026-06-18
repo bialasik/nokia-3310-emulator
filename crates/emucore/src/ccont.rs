@@ -74,12 +74,12 @@ impl Ccont {
 
     /// Tik RTC: wolany co krok CPU. Po ~13e6 krokach (1 s @13MHz) inkrementuje sekundy
     /// z przeniesieniem min/godz/dzien (reg7/8/9/0A). Daje "zywy" zegar w standby.
-    pub fn tick(&mut self) {
-        self.rtc_steps += 1;
+    pub fn tick(&mut self, cycles: u32) {
+        self.rtc_steps += cycles as u64;
         if self.rtc_steps < 13_000_000 {
             return;
         }
-        self.rtc_steps = 0;
+        self.rtc_steps -= 13_000_000;
         let sec = (self.regs[0x07] & 0x3F) + 1;
         if sec < 60 {
             self.regs[0x07] = sec;
