@@ -193,6 +193,7 @@ boot behavior without rebuilding.
 
 ## Credits & licensing
 
+- Marcin Selerowski + Claude Code (mostly Opus 4.8)
 - The ARM7TDMI core is adapted from
   [**rustboyadvance-ng**](https://github.com/michelhe/rustboyadvance-ng) (MIT).
 - Reverse-engineering leans on the **MADos**, **NokiX**, **swsim**, and **MAME**
