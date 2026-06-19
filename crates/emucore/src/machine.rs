@@ -290,6 +290,11 @@ impl Machine {
         if self.keypad.take_key_irq() {
             self.ctsi.irq_latch |= 1 << 0;
             self.key_irq_asserts += 1;
+            // AUDIO_LOG: marker przerwania klawiatury - do korelacji z komenda audio DSP.
+            static KL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if dbg_flag(&KL, "AUDIO_LOG") {
+                eprintln!("[aud >>>>>> KEY-IRQ t={}]", self.tick_count);
+            }
         }
         // SIM UART RX (FIQ bit6 = SIMUART): po aktywacji karty (CTRL bit7) SIM wysyla ATR
         // bajt-po-bajcie. Gdy bajt gotowy -> assert FIQ bit6; ISR czyta RXD (0x20037).
@@ -372,6 +377,20 @@ impl Machine {
         let off = (byte_addr - MMIO_START) as usize;
         self.mmio[off] = (val >> 8) as u8;
         self.mmio[off + 1] = val as u8;
+    }
+
+    /// Stan tonu DSP -> glosnik rozmow (tony klawiszy DTMF). Firmware pisze do shared-mem DSP:
+    /// 0x100AE = freq_high*4, 0x100B0 = freq_low*4, 0x100B6 = gain. Czest. Hz = wartosc/4
+    /// (zdekodowane: "5" -> 0x14E0/4=1336 + 0x0C08/4=770 = DTMF "5"). Ton gra gdy gain != 0
+    /// i OBIE czestotliwosci ustawione (dwutonowy DTMF; idle ustawia tylko jedna -> cisza).
+    pub fn dsp_tone_state(&self) -> (u32, u32, bool) {
+        let fh = self.dsp_r16(0x0001_00AE) as u32;
+        let fl = self.dsp_r16(0x0001_00B0) as u32;
+        let gain = self.dsp_r16(0x0001_00B6) as u32;
+        // Gain (0x100B6) to bramka tonu (on/off per klawisz; idle=0). Cyfry: DTMF dwutonowy
+        // (fh+fl). Nawigacja/funkcyjne: pojedynczy ton (fh, fl=0). Gra gdy gain != 0 i fh != 0.
+        let playing = gain != 0 && fh != 0;
+        (fh / 4, fl / 4, playing)
     }
 
     /// Czyta komende L1 z kolejki MDISND (MCU->DSP, wg MADos): od HEAD slowo kontrolne {rozmiar,typ}
@@ -798,6 +817,22 @@ impl Machine {
         self.periph.observe_write(addr, val);
         // Buzzer PUP (audio): obserwuj dzielnik czest./glosnosc/enable.
         self.buzzer.observe_write(addr, val);
+        // AUDIO_LOG: szeroki log zapisow regionow-kandydatow na ton klawisza/sluchawki
+        // (GENSIO/COBBA 0x2C/2D/6C/6D, McuGenIO 0x20/24, DSP data poza MDISND, MCUIF). Prog
+        // ticka AUDIO_FROM (domyslnie 40M, po boocie) by porownac idle vs nacisniecie.
+        {
+            static AL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            static AF: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+            if dbg_flag(&AL, "AUDIO_LOG") {
+                let from = *AF.get_or_init(|| std::env::var("AUDIO_FROM")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(40_000_000));
+                // Region komend tonu DSP (0x100A8..0x100E2: blok komendy + mailbox kick).
+                let cand = (0x0001_00A8..0x0001_00E2).contains(&addr);
+                if cand && self.tick_count >= from {
+                    eprintln!("[aud {addr:#08X}={val:#04X} t={}]", self.tick_count);
+                }
+            }
+        }
         // DSP: zapis IO_CTSI_DSP (0x20002) bit0 = wlaczenie -> start bootu DSP.
         if addr == REG_CTSI_DSP {
             self.dsp.on_ctsi_dsp_write(val);

@@ -380,6 +380,8 @@ impl Emulator {
     pub fn total_cycles(&self) -> u64 { self.cpu.bus.total_cycles }
     /// Stan buzzera do syntezy audio: (czestotliwosc_Hz, glosnosc 0..255, czy_gra).
     pub fn buzzer_state(&self) -> (u32, u8, bool) { self.cpu.bus.buzzer.state() }
+    /// Stan tonu DSP -> glosnik rozmow (DTMF tony klawiszy): (freq_high_Hz, freq_low_Hz, czy_gra).
+    pub fn dsp_tone_state(&self) -> (u32, u32, bool) { self.cpu.bus.dsp_tone_state() }
     /// Wait-states flasha (regulacja tempa live).
     pub fn flash_ws(&self) -> u32 { self.cpu.bus.flash_ws() }
     pub fn set_flash_ws(&mut self, ws: u32) { self.cpu.bus.set_flash_ws(ws); }

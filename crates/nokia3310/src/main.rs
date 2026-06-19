@@ -172,10 +172,12 @@ fn main() {
                 // Samokorekta budzetu: odejmij RZECZYWIScie zuzyte cykle (nie estymate).
                 let consumed = e.total_cycles() - cyc0;
                 budget -= consumed as f64;
-                // Audio: zaktualizuj buzzer stanem sprzetowych rejestrow PUP.
+                // Audio: zaktualizuj buzzer (dzwonki, PUP) + ton DSP (DTMF klawiszy, glosnik rozmow).
                 if let Some(a) = &audio {
                     let (bf, bv, bp) = e.buzzer_state();
                     a.update(bf, bv, bp);
+                    let (t1, t2, tp) = e.dsp_tone_state();
+                    a.update_tone(t1, t2, tp);
                 }
                 // Aktualizuj estymate CPI z faktycznego zuzycia (sledzi WS zmieniane Z/X).
                 if n > 0 {
