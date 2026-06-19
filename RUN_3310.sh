@@ -10,6 +10,8 @@
 #   REG_ALL=1          - bitmapa dostarczalności indykacji (wszystkie taski) -> eventy MMI płyną
 #   ST_PASS=1          - bramka watchdog/CONTACT (0x11ff1f pass) -> telefon nie wyłącza się
 #   SIM_ATR=1          - włącza model ATR/APDU karty SIM -> init SIM -> prompt PIN
+#   SIM_IMSI=001011234567890 - test-SIM MCC=001 omija SIMLOCK (po PIN: kod 12345
+#                      akceptowany); IMSI użyty przy testach akceptacji PIN
 #
 # Firmware: crates/rom/ MUSI mieć TYLKO 6.39 ("3310 v6.39 Converted MCU+PPM B.fls",
 # loader pokazuje `firmware id : 39 23-12-04 NHM-5`) + EEPROM 607. NIE trzymać 33DM101
@@ -20,4 +22,5 @@
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cd "$(dirname "$0")"
 DSP_FIQ_AT=20000 TIMER_AUTORELOAD=1 SELFTEST_SUB=1 REG_ALL=1 ST_PASS=1 SIM_ATR=1 \
+  SIM_IMSI=001011234567890 \
   cargo run --release -p nokia3310
