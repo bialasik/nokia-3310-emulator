@@ -1,5 +1,8 @@
 # Nokia 3310 Emulator
 
+<img width="560" height="534" alt="image" src="https://github.com/user-attachments/assets/414cab30-18db-4594-bbb2-a963ab254e96" />
+
+
 A hardware-level emulator of the **Nokia 3310** (DCT3 platform), written in Rust.
 It does not reimplement the phone's UI — it emulates the chip and runs the
 **original, unmodified Nokia firmware** on a virtual ARM7TDMI core, booting the
