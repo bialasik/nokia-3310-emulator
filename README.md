@@ -3,11 +3,7 @@
 A hardware-level emulator of the **Nokia 3310** (DCT3 platform), written in Rust.
 It does not reimplement the phone's UI — it emulates the chip and runs the
 **original, unmodified Nokia firmware** on a virtual ARM7TDMI core, booting the
-real phone software all the way to the **"Enter PIN"** screen.
-
-As far as we are aware, no other working DCT3 emulator exists. MAME's `nokia_3310`
-driver is marked `MACHINE_NOT_WORKING` and does not emulate the baseband. This
-project boots stock firmware and lets you navigate the menus from your keyboard.
+real phone software all the way.
 
 > ⚠️ **No firmware is included.** The emulator ships with *no* ROM. You must supply
 > your own firmware images, dumped from a phone you own (see [Firmware](#firmware)).
